@@ -10,15 +10,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 # 1. Page Configuration
 st.set_page_config(page_title="AI Petrophysics", layout="wide")
-# --- INITIALIZE SESSION STATE VARIABLES ---
-if 'recorded_logs_figs_list' not in st.session_state:
-    st.session_state['recorded_logs_figs_list'] = []
-    
-if 'smoothed_logs_figs_list' not in st.session_state:
-    st.session_state['smoothed_logs_figs_list'] = []
-    
-if 'histogram_figs_list' not in st.session_state:
-    st.session_state['histogram_figs_list'] = []
+
 # --- CUSTOM UI CSS FOR TABS ---
 st.markdown(
     """
