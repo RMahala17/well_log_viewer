@@ -256,7 +256,7 @@ if uploaded_file is not None:
                     </p>
                 </div>
                 <div style="font-size: 4.5rem; opacity: 0.85; margin-right: 10px;">
-                    🏗️
+                    
                 </div>
             </div>
             """,
@@ -1413,7 +1413,7 @@ else:
     st.markdown(
         """
         <div style="background-color: rgba(128, 128, 128, 0.12); padding: 25px; border-radius: 15px; margin-bottom: 30px; border-left: 5px solid #ff4b4b; border-top: 1px solid rgba(128, 128, 128, 0.15); border-right: 1px solid rgba(128, 128, 128, 0.15); border-bottom: 1px solid rgba(128, 128, 128, 0.15);">
-            <h1 style="margin: 0; font-size: 2.6rem; font-weight: bold; letter-spacing: 0.5px;">⚡ AI Petrophysics</h1>
+            <h1 style="margin: 0; font-size: 2.6rem; font-weight: bold; letter-spacing: 0.5px;"> AI Petrophysics</h1>
             <p style="font-size: 1.1rem; margin-top: 6px; margin-bottom: 0; opacity: 0.75; font-family: sans-serif;">
                 Advanced Subsurface Wireline Log Evaluation & Intelligent Interpretation Suite
             </p>
@@ -1440,19 +1440,19 @@ else:
             """
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 20px; margin-bottom: 25px;">
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">📊</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Multi-Track Logs</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">📈</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Crossplot Maps</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">🧮</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Petrophysical Math</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">🤖</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Machine Learning</span>
                 </div>
             </div>
@@ -1471,7 +1471,7 @@ else:
             st.markdown(
                 """
                 <div style="background-color: rgba(128, 128, 128, 0.08); height: 320px; border-radius: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px dashed rgba(128, 128, 128, 0.25); text-align: center; padding: 20px;">
-                    <span style="font-size: 50px; margin-bottom: 10px;">🏗️</span>
+                    <span style="font-size: 50px; margin-bottom: 10px;"></span>
                     <h4 style="margin: 5px 0; opacity: 0.8;">Asset Placeholder: rig.jpg</h4>
                     <p style="opacity: 0.6; max-width: 280px; font-size: 0.85rem; line-height: 1.4;">
                         Place your rig photo file inside the 'petapp' folder directory to automatically load platform graphics here!
