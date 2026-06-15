@@ -1,9 +1,5 @@
 import streamlit as st
 import lasio
-import plotly.io as pio
-
-# Linux Cloud Cloud Server ke liye Chromium engine parameters set karna
-pio.kaleido.scope.chromium_args = ("--headless", "--no-sandbox", "--single-process", "--disable-gpu")
 import pandas as pd
 import numpy as np
 import plotly.express as px
