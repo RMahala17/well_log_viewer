@@ -1,6 +1,8 @@
 streamlit
-lasio
 pandas
 numpy
+lasio
 plotly
 scikit-learn
+fpdf
+kaleido
