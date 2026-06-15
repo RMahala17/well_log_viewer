@@ -5,4 +5,4 @@ lasio
 plotly
 scikit-learn
 fpdf
-kaleido==0.1.0.post1
+kaleido
