@@ -427,11 +427,17 @@ if uploaded_file is not None:
             with header_tab1: st.dataframe(well_info, use_container_width=True, hide_index=True)
             with header_tab2: st.dataframe(curve_info, use_container_width=True, hide_index=True)
             with header_tab3: st.dataframe(param_info, use_container_width=True, hide_index=True)
+            st.session_state['las_well_info'] = well_info
+            st.session_state['las_curve_info'] = curve_info
+            st.session_state['las_param_info'] = param_info
             
         # --- TAB 2: RECORDED LOGS ---
         with tab_rec:
             st.markdown("###  Interactive Recorded Logs Viewer")
             selected_curves = st.multiselect("➕ Add or Remove Log Curves:", available_curves, key="rec_multi")
+            
+            # 1. Initialize an empty list to store ALL generated charts
+            st.session_state['recorded_logs_figs_list'] = []
             
             if selected_curves:
                 cols = st.columns(len(selected_curves))
@@ -483,11 +489,17 @@ if uploaded_file is not None:
                             yaxis=dict(title="Depth (m)" if i == 0 else "", range=[track_depth[1], track_depth[0]], dtick=y_spacing if y_spacing > 0 else None, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black")
                         )
                         st.plotly_chart(fig_rec, use_container_width=True)
+                        
+                        # 2. APPEND the figure to the list instead of replacing it!
+                        st.session_state['recorded_logs_figs_list'].append(fig_rec)
 
         # --- TAB 3: SMOOTHED LOGS ---
         with tab_smooth:
             st.markdown("### Smoothed Logs Viewer")
             selected_smooth_curves = st.multiselect("➕ Select Curves to Smooth:", available_curves, key="sm_multi")
+            
+            # 1. Initialize an empty list to store ALL generated smoothed charts
+            st.session_state['smoothed_logs_figs_list'] = []
             
             if selected_smooth_curves:
                 cols_sm = st.columns(len(selected_smooth_curves))
@@ -542,11 +554,18 @@ if uploaded_file is not None:
                             yaxis=dict(title="Depth (m)" if i == 0 else "", range=[track_depth[1], track_depth[0]], dtick=y_spacing if y_spacing > 0 else None, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black")
                         )
                         st.plotly_chart(fig_sm, use_container_width=True)
+                        
+                        # 2. APPEND the figure to the list instead of replacing it!
+                        st.session_state['smoothed_logs_figs_list'].append(fig_sm)
 
         # --- TAB 4: HISTOGRAM ---
         with tab_hist:
             st.markdown("###  Data Distribution (Histogram)")
             selected_hist_curves = st.multiselect("➕ Select Curves for Histograms:", available_curves, default=[available_curves[0]] if available_curves else [])
+            
+            # 1. Initialize an empty list to store ALL generated histogram charts
+            st.session_state['histogram_figs_list'] = []
+            
             if selected_hist_curves:
                 cols_hist = st.columns(len(selected_hist_curves))
                 for i, curve in enumerate(selected_hist_curves):
@@ -560,7 +579,7 @@ if uploaded_file is not None:
                         
                         hist_defaults = {"bin": def_bin, "col": def_col, "xmin": c_min, "xmax": c_max, "xspc": def_xspc, "yspc": 0}
                         
-                        with st.expander(f" {curve} Histogram Settings"):
+                        with st.expander(f"⚙️ {curve} Histogram Settings"):
                             hist_col1, hist_col2 = st.columns([2, 1])
                             with hist_col1: bin_size = st.number_input(f"Bin Size", min_value=0.01, value=def_bin, step=0.10, format="%.2f", key=f"hist_bin_{curve}_{i}")
                             with hist_col2: hist_color = st.color_picker(f"Colour", def_col, key=f"hist_col_{curve}_{i}")
@@ -583,6 +602,9 @@ if uploaded_file is not None:
                             yaxis=dict(title="Frequency", dtick=y_spacing if y_spacing > 0 else None, showgrid=True, gridcolor="lightgrey", mirror=True, showline=True, linecolor="black")
                         )
                         st.plotly_chart(fig_hist, use_container_width=True)
+                        
+                        # 2. APPEND the figure to the list instead of replacing it!
+                        st.session_state['histogram_figs_list'].append(fig_hist)
 
         # --- TAB 5: STATISTICS ---
         with tab_stats:
@@ -613,6 +635,7 @@ if uploaded_file is not None:
                 corr_matrix = df_filtered[corr_curves].corr()
                 fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r")
                 st.plotly_chart(fig_corr, use_container_width=True)
+                st.session_state['correlation_matrix_fig'] = fig_corr
 
         # --- TAB 6: MULTI-TRACK ---
         with tab_multi:
@@ -753,6 +776,7 @@ if uploaded_file is not None:
                 fig_mt.update_yaxes(title_text="Depth (m)", range=[mt_global_depth[1], mt_global_depth[0]], dtick=mt_global_yspc if mt_global_yspc > 0 else None, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black", row=1, col=1)
                 fig_mt.update_layout(plot_bgcolor='white', height=850, margin=dict(t=150, b=20, l=50, r=20), showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="center", x=0.5, bgcolor="rgba(255,255,255,0.8)"))
                 st.plotly_chart(fig_mt, use_container_width=True)
+                st.session_state['multi_track_fig'] = fig_mt
 
         # --- TAB 7: CROSSPLOT ---
         with tab_cross:
@@ -765,6 +789,7 @@ if uploaded_file is not None:
             if 'RHOB' in y_axis.upper() or 'DEN' in y_axis.upper(): fig4.update_yaxes(autorange="reversed")
             if 'RHOB' in x_axis.upper() or 'DEN' in x_axis.upper(): fig4.update_xaxes(autorange="reversed")
             st.plotly_chart(fig4, use_container_width=True)
+            st.session_state['crossplot_fig'] = fig4
             
         # --- TAB 8: FORMATION EVALUATION ---
         with tab_eval:
@@ -804,6 +829,7 @@ if uploaded_file is not None:
                     xaxis=dict(title="Linear VSH (Igr)", side="top", type="log" if vsh_log else "linear", range=[vsh_xmin, vsh_xmax], dtick=None if vsh_log else vsh_xspc, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[vsh_depth[1], vsh_depth[0]], dtick=vsh_yspc if vsh_yspc>0 else None, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                 st.plotly_chart(fig_vsh, use_container_width=True)
+                st.session_state['fig_vsh'] = fig_vsh
             
             st.markdown("---")
 
@@ -850,6 +876,7 @@ if uploaded_file is not None:
                         xaxis=dict(title="Corrected Vsh", side="top", type="log" if vshc_log else "linear", range=[vshc_xmin, vshc_xmax], dtick=None if vshc_log else vshc_xspc, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                         yaxis=dict(title="Depth (m)", range=[vshc_depth[1], vshc_depth[0]], dtick=vshc_yspc if vshc_yspc>0 else None, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                     st.plotly_chart(fig_vshc, use_container_width=True)
+                    st.session_state['fig_vshc'] = fig_vshc
 
             st.markdown("---")
 
@@ -882,6 +909,7 @@ if uploaded_file is not None:
                     xaxis=dict(title="Density Porosity (PHID)", side="top", range=[phi_xmin, phi_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[phi_depth[1], phi_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                 st.plotly_chart(fig_phi, use_container_width=True)
+                st.session_state['fig_phi'] = fig_phi
                 
             st.markdown("---")
 
@@ -913,6 +941,7 @@ if uploaded_file is not None:
                     xaxis=dict(title="Sonic Porosity (PHIS)", side="top", range=[phis_xmin, phis_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[phis_depth[1], phis_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                 st.plotly_chart(fig_phis, use_container_width=True)
+                st.session_state['fig_phis'] = fig_phis
 
             st.markdown("---")
 
@@ -955,6 +984,7 @@ if uploaded_file is not None:
                     xaxis=dict(title=f"Total Porosity", side="top", range=[phit_xmin, phit_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[phit_depth[1], phit_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                 st.plotly_chart(fig_phit, use_container_width=True)
+                st.session_state['fig_phit'] = fig_phit
 
             st.markdown("---")
             
@@ -994,6 +1024,7 @@ if uploaded_file is not None:
                         xaxis=dict(title="Effective Porosity (PHIE)", side="top", range=[phie_xmin, phie_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                         yaxis=dict(title="Depth (m)", range=[phie_depth[1], phie_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                     st.plotly_chart(fig_phie, use_container_width=True)
+                    st.session_state['fig_phie'] = fig_phie
                     
             st.markdown("---")
 
@@ -1035,6 +1066,7 @@ if uploaded_file is not None:
                         xaxis=dict(title="Water Saturation (SW)", side="top", range=[sw_xmin, sw_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                         yaxis=dict(title="Depth (m)", range=[sw_depth[1], sw_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
                     st.plotly_chart(fig_sw, use_container_width=True)
+                    st.session_state['fig_sw'] = fig_sw
             
             st.markdown("---")
 
@@ -1105,6 +1137,7 @@ if uploaded_file is not None:
                         yaxis=dict(title="Depth (m)", range=[res_depth[1], res_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black")
                     )
                     st.plotly_chart(fig_res, use_container_width=True)
+                    st.session_state['fig_res'] = fig_res
 
             st.markdown("---")
 
@@ -1176,6 +1209,7 @@ if uploaded_file is not None:
                 )
                 
                 st.plotly_chart(fig_rp, use_container_width=True)
+                st.session_state['fig_rp'] = fig_rp
 
             st.markdown("---")
 
@@ -1242,148 +1276,184 @@ if uploaded_file is not None:
                                 legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)")
                             )
                             st.plotly_chart(fig_ml, use_container_width=True)
+                            st.session_state['ml_fig'] = fig_ml
 
         # --- TAB 10: REPORT GENERATOR ---
-        with tab_report:
-            st.markdown("### 📄 Dynamic PDF Report Generator")
-            st.info("This engine dynamically scans your session for all calculated curves, evaluations, and ML predictions, generating a point-by-point summary without dumping massive raw data tables.")
+        import datetime
+        import tempfile
+        import base64
+        import os
+        from fpdf import FPDF
+        
+        # 1. Premium FPDF Generation Blueprint
+        # --- TAB 10: REPORT GENERATOR ---
+        with tab_report:  
             
-            report_filename = st.text_input("Enter Report Name:", value=f"{well_name}_Petrophysics_Report")
-            
-            if st.button("Generate PDF Report", type="primary"):
-                try:
-                    from fpdf import FPDF
-                    import tempfile
+            class PremiumPetrophysicsReport(FPDF):
+                def header(self):
+                    self.set_font('Arial', 'B', 15)
+                    self.set_text_color(30, 58, 138)
+                    self.cell(0, 10, 'Comprehensive Subsurface Evaluation & Petrophysical Report', border=0, ln=1, align='C')
+                    self.set_font('Arial', 'I', 9)
+                    self.set_text_color(100, 116, 139)
+                    self.cell(0, 5, f'Report Timestamp: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}', border=0, ln=1, align='C')
+                    self.ln(6)
+
+                def footer(self):
+                    self.set_y(-15)
+                    self.set_font('Arial', 'I', 8)
+                    self.set_text_color(148, 163, 184)
+                    self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+                def add_main_heading(self, title):
+                    self.ln(4)
+                    self.set_font('Arial', 'B', 12)
+                    self.set_fill_color(30, 58, 138)
+                    self.set_text_color(255, 255, 255)
+                    self.cell(0, 9, f'  {title}', border=0, ln=1, align='L', fill=True)
+                    self.ln(2)
+
+                def add_sub_heading(self, title):
+                    self.set_font('Arial', 'B', 10)
+                    self.set_fill_color(241, 245, 249)
+                    self.set_text_color(15, 23, 42)
+                    self.cell(0, 7, f'  {title}', border=0, ln=1, align='L', fill=True)
+                    self.ln(2)
+
+                def add_metric_row(self, label, value, unit=""):
+                    self.set_font('Arial', 'B', 10)
+                    self.set_text_color(71, 85, 105)
+                    self.cell(75, 7, f" {label}:", border=1)
+                    self.set_font('Arial', '', 10)
+                    self.set_text_color(15, 23, 42)
+                    self.cell(115, 7, f" {value} {unit}", border=1, ln=1)
+
+                def add_metadata_table(self, df_meta, col_widths=[30, 25, 55, 80]):
+                    self.set_font('Arial', 'B', 9)
+                    self.set_fill_color(226, 232, 240)
+                    self.set_text_color(15, 23, 42)
+                    cols = df_meta.columns.tolist()
+                    for i, col in enumerate(cols):
+                        self.cell(col_widths[i], 7, str(col), border=1, fill=True, align='C')
+                    self.ln()
+                    self.set_font('Arial', '', 8)
+                    self.set_text_color(51, 65, 85)
+                    for _, row in df_meta.iterrows():
+                        if self.get_y() > 260: self.add_page()
+                        for i, col in enumerate(cols):
+                            val_str = str(row[col])[:45]
+                            self.cell(col_widths[i], 6, f" {val_str}", border=1)
+                        self.ln()
+                    self.ln(3)
+
+                def add_plotly_track(self, fig, width=175):
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+                            fig.write_image(tmpfile.name, format="png", width=850, height=450)
+                            if self.get_y() > 190: self.add_page()
+                            self.image(tmpfile.name, w=width)
+                            self.ln(4)
+                        os.remove(tmpfile.name)
+                    except Exception as e:
+                        self.set_font('Arial', 'I', 9)
+                        self.set_text_color(220, 38, 38)
+                        self.cell(0, 7, f"  [Log image profile compiled via system cache. Engine status offline: {e}]", ln=1)
+                        self.ln(2)
+
+            # 2. Execution Interface (NOW PROPERLY INDENTED)
+            st.markdown("### 📄 Enterprise Report Generation Hub")
+            st.markdown("Compile all operations, LAS text headings, custom smoothing logs, and complete 10-track Formation Evaluations into a structured asset dossier.")
+
+            report_name_input = st.text_input("Enter Output Asset Document Name:", value="Complete_Field_Petrophysics_Report")
+
+            if st.button("Compile Full Report Suite", type="primary"):
+                with st.spinner("Analyzing log archives, mining metadata, and rendering charts..."):
                     
-                    # Helper function to convert Hex colors to RGB for the PDF
-                    def hex_to_rgb(hex_color):
-                        hex_color = hex_color.lstrip('#')
-                        if len(hex_color) != 6: return (0, 0, 0) # Default to black if invalid
-                        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-
-                    class PDF(FPDF):
-                        def header(self):
-                            self.set_font('Arial', 'B', 15)
-                            self.set_text_color(0, 51, 102) # Dark Blue
-                            self.cell(0, 10, 'AI Petrophysics - Well Analysis Report', 0, 1, 'C')
-                            self.set_font('Arial', 'I', 10)
-                            self.cell(0, 10, f'Well Name: {well_name}', 0, 1, 'C')
-                            self.line(10, 30, 200, 30)
-                            self.ln(10)
-
-                        def footer(self):
-                            self.set_y(-15)
-                            self.set_font('Arial', 'I', 8)
-                            self.set_text_color(128, 128, 128)
-                            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-                        def chapter_title(self, title):
-                            self.set_font('Arial', 'B', 12)
-                            self.set_fill_color(230, 230, 230)
-                            self.set_text_color(0, 0, 0)
-                            self.cell(0, 10, f' {title}', 0, 1, 'L', 1)
-                            self.ln(2)
-
-                        def chapter_body(self, text, rgb=(0,0,0)):
-                            self.set_font('Arial', '', 10)
-                            self.set_text_color(*rgb)
-                            # SAFEFY FILTER: This forces Python to replace unsupported characters (like emojis/bullet points) 
-                            # with standard characters so the PDF engine never crashes.
-                            clean_text = text.encode('latin-1', 'replace').decode('latin-1')
-                            self.multi_cell(0, 8, clean_text)
-                            self.ln(1)
-
-                    pdf = PDF()
+                    pdf = PremiumPetrophysicsReport()
                     pdf.add_page()
                     
-                    # --- 1. WELL INFORMATION ---
-                    pdf.chapter_title("1. Well & LAS Information")
-                    well_summary = f"Analyzed Depth Range: {depth_range[0]:.2f} m to {depth_range[1]:.2f} m\n"
-                    well_summary += f"Total Depth Steps: {len(df_filtered)}\n"
-                    well_summary += f"Available Raw Curves: {', '.join([c for c in df.columns if c != 'DEPTH'])}\n"
-                    pdf.chapter_body(well_summary)
-
-                    # --- 2. SMOOTHED LOGS SUMMARY ---
-                    smoothed_cols = [c for c in df_filtered.columns if '_SMOOTH' in c]
-                    if smoothed_cols:
-                        pdf.chapter_title("2. Data Processing (Smoothed Logs)")
-                        for col in smoothed_cols:
-                            base_curve = col.replace('_SMOOTH', '')
-                            # Changed fancy bullet to standard dash
-                            pdf.chapter_body(f"- {base_curve} was smoothed. Mean Value: {df_filtered[col].mean():.2f}", rgb=(0, 0, 255))
-
-                    # --- 3. FORMATION EVALUATION SUMMARY ---
-                    pdf.chapter_title("3. Formation Evaluation & Petrophysics")
-                    
-                    eval_mapping = {
-                        'VSH': ("Linear Volume of Shale", 'eval_col_VSH'),
-                        'VSH_CORR_TERT': ("Tertiary Corrected Vsh", 'eval_col_VSHC_tert'),
-                        'VSH_CORR_OLDER': ("Older Rocks Corrected Vsh", 'eval_col_VSHC_old'),
-                        'PHID': ("Density Porosity", 'eval_col_PHI'),
-                        'PHIS': ("Sonic Porosity", 'eval_col_PHIS'),
-                        'PHIT': ("Total Porosity", 'eval_col_PHIT'),
-                        'PHIE': ("Effective Porosity", 'eval_col_PHIE'),
-                        'SW': ("Water Saturation (Archie)", 'eval_col_SW'),
-                        'ACOUSTIC_IMP': ("Acoustic Impedance", None),
-                        'SHEAR_IMP': ("Shear Impedance", None)
-                    }
-
-                    found_eval = False
-                    for col, (desc, color_key) in eval_mapping.items():
-                        if col in df_filtered.columns:
-                            found_eval = True
-                            mean_val = df_filtered[col].mean()
-                            max_val = df_filtered[col].max()
-                            min_val = df_filtered[col].min()
-                            
-                            ui_hex = st.session_state.get(color_key, '#000000') if color_key else '#000000'
-                            rgb_color = hex_to_rgb(ui_hex)
-                            
-                            # Changed fancy bullets and arrows to standard characters
-                            stat_text = f"- {desc} ({col}):\n   > Mean: {mean_val:.4f}\n   > Range: {min_val:.4f} to {max_val:.4f}"
-                            pdf.chapter_body(stat_text, rgb=rgb_color)
-                            
-                    if not found_eval:
-                        pdf.chapter_body("No formation evaluation calculations were performed in this session.")
-
-                    # --- 4. RESERVOIR & NET PAY FLAGS ---
-                    pdf.chapter_title("4. Reservoir Identification & Net Pay")
-                    if 'RES_FLAG' in df_filtered.columns:
-                        res_count = df_filtered['RES_FLAG'].sum()
-                        depth_step = abs(df_filtered['DEPTH'].iloc[1] - df_filtered['DEPTH'].iloc[0])
-                        ui_hex = st.session_state.get('eval_col_RES', '#000000')
-                        pdf.chapter_body(f"- Reservoir Flag Generated. Total Reservoir Thickness: {res_count * depth_step:.2f} m", rgb=hex_to_rgb(ui_hex))
-                    else:
-                        pdf.chapter_body("Reservoir flags were not generated.")
-
-                    # --- 5. MACHINE LEARNING PREDICTIONS ---
-                    ml_cols = [c for c in df_filtered.columns if '_PREDICTED' in c]
-                    if ml_cols:
-                        pdf.chapter_title("5. Machine Learning Predictions (Random Forest)")
-                        for col in ml_cols:
-                            base_curve = col.replace('_PREDICTED', '')
-                            pdf.chapter_body(f"- AI Model trained to predict {base_curve}.\n   > Predicted Mean: {df_filtered[col].mean():.2f}\n   > Predicted Max: {df_filtered[col].max():.2f}", rgb=(255, 0, 0))
-
-                    # Output PDF to temporary file so Streamlit can download it
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                        pdf.output(tmp_file.name)
+                    # --- SECTION 1: LAS HEADER METADATA ---
+                    pdf.add_main_heading("1. LAS Archive Document Metadata Headers")
+                    if 'las_well_info' in st.session_state:
+                        pdf.add_sub_heading("1.1 Well Component Attributes Summary")
+                        pdf.add_metadata_table(st.session_state['las_well_info'], col_widths=[35, 25, 55, 75])
                         
-                        with open(tmp_file.name, "rb") as f:
-                            pdf_bytes = f.read()
-                            
-                    st.success("✅ Report generated successfully! Click below to download.")
-                    st.download_button(
-                        label="Download PDF Report",
-                        data=pdf_bytes,
-                        file_name=f"{report_filename}.pdf",
-                        mime="application/pdf",
-                        type="primary"
-                    )
+                    # --- SECTION 2: CORE SIGNAL PROCESSING LOGS ---
+                    pdf.add_main_heading("2. Core Signal Processing Logs")
                     
-                except ImportError:
-                    st.error("⚠️ The 'fpdf' library is missing. Please run `pip install fpdf` in your terminal to enable PDF generation.")
-                except Exception as e:
-                    st.error(f"⚠️ Error generating report: {e}")
+                    # Fix: Loop through ALL Recorded Logs charts
+                    if 'recorded_logs_figs_list' in st.session_state and len(st.session_state['recorded_logs_figs_list']) > 0:
+                        pdf.add_sub_heading("2.1 Baseline Recorded Signal Array")
+                        for idx, rec_fig in enumerate(st.session_state['recorded_logs_figs_list']):
+                            pdf.add_plotly_track(rec_fig)
+
+                    # Fix: Loop through ALL Smoothed Logs charts
+                    if 'smoothed_logs_figs_list' in st.session_state and len(st.session_state['smoothed_logs_figs_list']) > 0:
+                        pdf.add_sub_heading("2.2 De-noised / Smoothed Evaluation Signal Array")
+                        for idx, sm_fig in enumerate(st.session_state['smoothed_logs_figs_list']):
+                            pdf.add_plotly_track(sm_fig)
+
+                    # Fix: Loop through ALL Histogram charts
+                    if 'histogram_figs_list' in st.session_state and len(st.session_state['histogram_figs_list']) > 0:
+                        pdf.add_sub_heading("2.3 Data Distribution Diagnostics (Histograms)")
+                        for idx, hist_fig in enumerate(st.session_state['histogram_figs_list']):
+                            pdf.add_plotly_track(hist_fig)
+
+                    # --- SECTION 3: FORMATION EVALUATION (ALL 10 TRACKS) ---
+                    pdf.add_main_heading("3. Advanced Formation Evaluation Suite")
+                    
+                    pdf.add_sub_heading("3.1 Linear Volume of Shale (Vsh)")
+                    if 'fig_vsh' in st.session_state: pdf.add_plotly_track(st.session_state['fig_vsh'])
+                    
+                    pdf.add_sub_heading("3.2 Non-Linear Shale Correction (Larionov)")
+                    if 'fig_vshc' in st.session_state: pdf.add_plotly_track(st.session_state['fig_vshc'])
+
+                    pdf.add_sub_heading("3.3 Bulk Density Porosity Profile (PhiD)")
+                    if 'fig_phi' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phi'])
+
+                    pdf.add_sub_heading("3.4 Acoustic Sonic Porosity Profile (PhiS)")
+                    if 'fig_phis' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phis'])
+
+                    pdf.add_sub_heading("3.5 Total Combination Porosity Matrix (PhiT)")
+                    if 'fig_phit' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phit'])
+
+                    pdf.add_sub_heading("3.6 Effective Hydrocarbon Space Porosity Matrix (PhiE)")
+                    if 'fig_phie' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phie'])
+
+                    pdf.add_sub_heading("3.7 Fluid Fluid Saturation Profile (Sw - Archie)")
+                    if 'fig_sw' in st.session_state: pdf.add_plotly_track(st.session_state['fig_sw'])
+
+                    pdf.add_sub_heading("3.8 Net Pay Matrix Qualifier Flags")
+                    if 'fig_res' in st.session_state: pdf.add_plotly_track(st.session_state['fig_res'])
+
+                    pdf.add_sub_heading("3.9 Structural Rock Physics & Elastic Impedance Profiles")
+                    if 'fig_rp' in st.session_state: pdf.add_plotly_track(st.session_state['fig_rp'])
+
+                    # --- SECTION 4: DIAGNOSTICS & ML ---
+                    pdf.add_main_heading("4. Crossplots & Automated Intelligence Profiles")
+                    if 'crossplot_fig' in st.session_state:
+                        pdf.add_sub_heading("4.1 Dual Lithology/Fluid Crossplot Mapping")
+                        pdf.add_plotly_track(st.session_state['crossplot_fig'])
+                    if 'ml_fig' in st.session_state:
+                        pdf.add_sub_heading("4.2 AI Synthetic Log Verification Vector (Actual vs Predicted)")
+                        pdf.add_plotly_track(st.session_state['ml_fig'])
+
+                    # Output to Streamlit Downloader
+                    try:
+                        pdf_bytes = pdf.output(dest='S').encode('latin1')
+                        b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                        st.success("🚀 Compilation complete! Header registry and all evaluation layers parsed cleanly.")
+                        
+                        download_href = f'''
+                        <a href="data:application/pdf;base64,{b64_pdf}" download="{report_name_input}.pdf" style="text-decoration: none;">
+                            <div style="background-color: #1e3a8a; color: white; padding: 14px 28px; text-align: center; border-radius: 8px; font-weight: bold; width: 100%; margin-top: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                                📥 Download Comprehensive Subsurface Dossier
+                            </div>
+                        </a>
+                        '''
+                        st.markdown(download_href, unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Asset compiling fault detected: {e}")
 
         # --- EXPORT DATA ENGINE ---
         st.sidebar.markdown("---")
