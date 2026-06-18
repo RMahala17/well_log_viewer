@@ -796,6 +796,24 @@ if uploaded_file is not None:
         with tab_eval:
             st.markdown("###  Formation Evaluation Calculator")
             
+            # 🛠️ THE NEW ROUTING HELPER FUNCTION (Confined strictly to this tab)
+            def route_to_viewers(curve_name, destinations):
+                """Safely adds calculated curves to other tabs by modifying session state directly."""
+                # 1. Make sure it's in the global available curves list
+                if 'available_curves' in st.session_state and curve_name not in st.session_state.available_curves:
+                    st.session_state.available_curves.append(curve_name)
+                if curve_name not in available_curves:
+                    available_curves.append(curve_name)
+                    
+                # 2. Add to the specific selected tabs if the user checked the box
+                if "Recorded Logs" in destinations:
+                    if 'rec_multi' in st.session_state and curve_name not in st.session_state['rec_multi']:
+                        st.session_state['rec_multi'].append(curve_name)
+                        
+                if "Smoothed Logs" in destinations:
+                    if 'sm_multi' in st.session_state and curve_name not in st.session_state['sm_multi']:
+                        st.session_state['sm_multi'].append(curve_name)
+
             # --- 1. VOLUME OF SHALE (VSH) / IGR ---
             st.markdown("#### 1. Volume of Shale (Linear Index - Igr)")
             vsh_c1, vsh_c2, vsh_c3 = st.columns(3)
@@ -818,22 +836,37 @@ if uploaded_file is not None:
                 if 'reset_eval_settings' in globals(): st.button("🔄 Reset Vsh Settings", on_click=reset_eval_settings, args=("VSH", vsh_defaults), key="res_VSH")
             
             vsh_dest = st.multiselect("🔗 Send 'VSH' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="vsh_dest")
+            
             if st.button("Calculate Volume of Shale (Linear Index)"):
-                df_filtered['VSH'] = ((df_filtered[gr_curve] - gr_clean) / (gr_shale - gr_clean)).clip(0, 1)
-                st.session_state.df['VSH'] = df_filtered['VSH']
+                # 1. Calculate the curve
+                calculated_vsh = ((df_filtered[gr_curve] - gr_clean) / (gr_shale - gr_clean)).clip(0, 1)
+                
+                # 2. THE CRITICAL FIX: Save it to master_log_df so it bypasses the deletion security!
+                st.session_state.master_log_df['VSH'] = calculated_vsh
+                df_filtered['VSH'] = calculated_vsh 
+                
+                # 3. Use your original routing function
                 route_calculated_curve('VSH', vsh_dest)
-                st.success("✅ Linear VSH (Igr) Calculated!")
+                st.success("✅ Linear VSH (Igr) Calculated & Saved permanently!")
+                
+                # 4. Save the figure for display
                 fig_vsh = go.Figure()
                 fig_vsh.add_trace(go.Scatter(x=df_filtered['VSH'], y=df_filtered['DEPTH'], mode='lines', line=dict(color=vsh_color, width=1.5)))
                 fig_vsh.update_layout(plot_bgcolor='white', height=600, margin=dict(t=150, b=20, l=50, r=20),
                     legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
                     xaxis=dict(title="Linear VSH (Igr)", side="top", type="log" if vsh_log else "linear", range=[vsh_xmin, vsh_xmax], dtick=None if vsh_log else vsh_xspc, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[vsh_depth[1], vsh_depth[0]], dtick=vsh_yspc if vsh_yspc>0 else None, showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
-                st.plotly_chart(fig_vsh, use_container_width=True)
+                
                 st.session_state['fig_vsh'] = fig_vsh
+                
+                # 5. Refresh the app so the other tabs update
+                st.rerun()
             
+            # Display the figure safely outside the button
+            if 'fig_vsh' in st.session_state:
+                st.plotly_chart(st.session_state['fig_vsh'], use_container_width=True)
             st.markdown("---")
-
+            
             # --- 2. VSH CORRECTION (LARIONOV) ---
             st.markdown("#### 2. Volume of Shale Correction (Larionov)")
             vsh_candidates = [col for col in df_filtered.columns if 'VSH' in col.upper() or 'IGR' in col.upper()]
@@ -898,23 +931,39 @@ if uploaded_file is not None:
                 phi_depth = st.slider("Isolate Depth", min_value=depth_range[0], max_value=depth_range[1], value=phi_defaults["depth"], key="eval_depth_PHI")
 
             phi_dest = st.multiselect("🔗 Send 'PHID' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="phi_dest")
+            
             if st.button("Calculate Density Porosity (PhiD)"):
-                df_filtered['PHID'] = ((rho_mat - df_filtered[rho_curve]) / (rho_mat - rho_fl)).clip(0, 1)
-                st.session_state.df['PHID'] = df_filtered['PHID']
+                # 1. Calculate the curve
+                calculated_phid = ((rho_mat - df_filtered[rho_curve]) / (rho_mat - rho_fl)).clip(0, 1)
+                
+                # 2. Save it to master_log_df so it bypasses the deletion security!
+                st.session_state.master_log_df['PHID'] = calculated_phid
+                df_filtered['PHID'] = calculated_phid
+                
+                # 3. Use your routing function
                 route_calculated_curve('PHID', phi_dest)
-                st.success("✅ Density Porosity Calculated!")
+                st.success("✅ Density Porosity Calculated & Saved permanently!")
+                
+                # 4. Save the figure for display
                 fig_phi = go.Figure()
                 fig_phi.add_trace(go.Scatter(x=df_filtered['PHID'], y=df_filtered['DEPTH'], mode='lines', line=dict(color=phi_color, width=1.5)))
                 fig_phi.update_layout(plot_bgcolor='white', height=600, margin=dict(t=150, b=20, l=50, r=20),
                     legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
                     xaxis=dict(title="Density Porosity (PHID)", side="top", range=[phi_xmin, phi_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[phi_depth[1], phi_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
-                st.plotly_chart(fig_phi, use_container_width=True)
+                
                 st.session_state['fig_phi'] = fig_phi
                 
+                # 5. Refresh the app so the upper tabs update immediately
+                st.rerun()
+
+            # Display the figure safely outside the button so it never vanishes
+            if 'fig_phi' in st.session_state:
+                st.plotly_chart(st.session_state['fig_phi'], use_container_width=True)
+
             st.markdown("---")
 
-            # --- 4. SONIC POROSITY (PHIS) ---
+            # --- 4. SONIC POROSITY (WYLLIE TIME-AVERAGE) ---
             st.markdown("#### 4. Sonic Porosity (Wyllie Time-Average)")
             phis_c1, phis_c2, phis_c3 = st.columns(3)
             dt_idx = next((i for i, c in enumerate(available_curves) if any(x in c.upper() for x in ['DT', 'DTCO', 'AC'])), 0)
@@ -930,22 +979,38 @@ if uploaded_file is not None:
                 phis_depth = st.slider("Isolate Depth Range", min_value=depth_range[0], max_value=depth_range[1], value=phis_defaults["depth"], key="eval_depth_PHIS")
 
             phis_dest = st.multiselect("🔗 Send 'PHIS' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="phis_dest")
+            
             if st.button("Calculate Sonic Porosity (PhiS)"):
-                df_filtered['PHIS'] = ((df_filtered[dt_curve] - dt_mat) / (dt_fl - dt_mat)).clip(0, 1)
-                st.session_state.df['PHIS'] = df_filtered['PHIS']
+                # 1. Calculate the curve
+                calculated_phis = ((df_filtered[dt_curve] - dt_mat) / (dt_fl - dt_mat)).clip(0, 1)
+                
+                # 2. Save it to master_log_df so it bypasses the deletion security!
+                st.session_state.master_log_df['PHIS'] = calculated_phis
+                df_filtered['PHIS'] = calculated_phis
+                
+                # 3. Use your routing function
                 route_calculated_curve('PHIS', phis_dest)
-                st.success("✅ Sonic Porosity Calculated!")
+                st.success("✅ Sonic Porosity Calculated & Saved permanently!")
+                
+                # 4. Save the figure for display
                 fig_phis = go.Figure()
                 fig_phis.add_trace(go.Scatter(x=df_filtered['PHIS'], y=df_filtered['DEPTH'], mode='lines', line=dict(color=phis_color, width=1.5)))
                 fig_phis.update_layout(plot_bgcolor='white', height=600, margin=dict(t=150, b=20, l=50, r=20),
                     legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
                     xaxis=dict(title="Sonic Porosity (PHIS)", side="top", range=[phis_xmin, phis_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[phis_depth[1], phis_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
-                st.plotly_chart(fig_phis, use_container_width=True)
+                
                 st.session_state['fig_phis'] = fig_phis
+                
+                # 5. Refresh the app so the upper tabs update immediately
+                st.rerun()
+
+            # Display the figure safely outside the button so it stays visible
+            if 'fig_phis' in st.session_state:
+                st.plotly_chart(st.session_state['fig_phis'], use_container_width=True)
 
             st.markdown("---")
-
+            
             # --- 5. TOTAL POROSITY (PHIT - NEUTRON DENSITY) ---
             st.markdown("#### 5. Total Porosity (Neutron-Density Combination)")
             
@@ -970,22 +1035,35 @@ if uploaded_file is not None:
                 nphi = df_filtered[nphi_curve]
                 phid = df_filtered[phid_curve]
                 if "Gas" in geological_case:
-                    df_filtered['PHIT'] = np.sqrt((nphi**2 + phid**2) / 2).clip(0, 1)
+                    calculated_phit = np.sqrt((nphi**2 + phid**2) / 2).clip(0, 1)
                 else:
-                    df_filtered['PHIT'] = ((nphi + phid) / 2).clip(0, 1)
+                    calculated_phit = ((nphi + phid) / 2).clip(0, 1)
                 
-                st.session_state.df['PHIT'] = df_filtered['PHIT']
+                # ✅ Save directly to master_log_df to escape the cleanup script
+                st.session_state.master_log_df['PHIT'] = calculated_phit
+                df_filtered['PHIT'] = calculated_phit
+                
+                # ✅ Use routing mapping helper
                 route_calculated_curve('PHIT', phit_dest)
-                st.success(f"✅ Total Porosity ({geological_case}) Calculated!")
+                st.success(f"✅ Total Porosity ({geological_case}) Calculated & Saved permanently!")
 
+                # ✅ Build chart
                 fig_phit = go.Figure()
                 fig_phit.add_trace(go.Scatter(x=df_filtered['PHIT'], y=df_filtered['DEPTH'], mode='lines', line=dict(color=phit_color, width=2)))
                 fig_phit.update_layout(plot_bgcolor='white', height=600, margin=dict(t=150, b=20, l=50, r=20),
                     legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
                     xaxis=dict(title=f"Total Porosity", side="top", range=[phit_xmin, phit_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                     yaxis=dict(title="Depth (m)", range=[phit_depth[1], phit_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
-                st.plotly_chart(fig_phit, use_container_width=True)
+                
+                # ✅ Store chart safely
                 st.session_state['fig_phit'] = fig_phit
+                
+                # ✅ Force refresh
+                st.rerun()
+
+            # ✅ Render plot safely outside the submission context so it doesn't vanish
+            if 'fig_phit' in st.session_state:
+                st.plotly_chart(st.session_state['fig_phit'], use_container_width=True)
 
             st.markdown("---")
             
@@ -1013,22 +1091,37 @@ if uploaded_file is not None:
                 phie_dest = st.multiselect("🔗 Send 'PHIE' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="phie_dest")
 
                 if st.button("Calculate Effective Porosity (PhiE)"):
-                    df_filtered['PHIE'] = (df_filtered[phit_for_phie] * (1 - df_filtered[vsh_for_phie])).clip(0, 1)
-                    st.session_state.df['PHIE'] = df_filtered['PHIE']
+                    # 1. Calculate the curve
+                    calculated_phie = (df_filtered[phit_for_phie] * (1 - df_filtered[vsh_for_phie])).clip(0, 1)
+                    
+                    # 2. Save it directly to master_log_df
+                    st.session_state.master_log_df['PHIE'] = calculated_phie
+                    df_filtered['PHIE'] = calculated_phie
+                    
+                    # 3. Route it safely to the other tabs
                     route_calculated_curve('PHIE', phie_dest)
-                    st.success("✅ Effective Porosity Calculated!")
+                    st.success("✅ Effective Porosity Calculated & Saved permanently!")
 
+                    # 4. Create the plot
                     fig_phie = go.Figure()
                     fig_phie.add_trace(go.Scatter(x=df_filtered['PHIE'], y=df_filtered['DEPTH'], mode='lines', line=dict(color=phie_color, width=2), fill='tozerox', fillcolor='rgba(220, 20, 60, 0.2)'))
                     fig_phie.update_layout(plot_bgcolor='white', height=600, margin=dict(t=150, b=20, l=50, r=20),
                         legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
                         xaxis=dict(title="Effective Porosity (PHIE)", side="top", range=[phie_xmin, phie_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                         yaxis=dict(title="Depth (m)", range=[phie_depth[1], phie_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
-                    st.plotly_chart(fig_phie, use_container_width=True)
+                    
+                    # 5. Store plot securely
                     st.session_state['fig_phie'] = fig_phie
                     
-            st.markdown("---")
+                    # 6. Refresh the app to update the dropdowns everywhere
+                    st.rerun()
 
+                # Display the chart safely outside the button
+                if 'fig_phie' in st.session_state:
+                    st.plotly_chart(st.session_state['fig_phie'], use_container_width=True)
+
+            st.markdown("---")
+            
             # --- 7. ARCHIE'S WATER SATURATION (SW) ---
             st.markdown("#### 7. Archie's Water Saturation (Sw)")
             poro_candidates = [col for col in df_filtered.columns if 'PHI' in col.upper()]
@@ -1053,21 +1146,35 @@ if uploaded_file is not None:
                     sw_depth = st.slider("Isolate Depth Sw", min_value=depth_range[0], max_value=depth_range[1], value=sw_defaults["depth"], key="eval_depth_SW")
 
                 sw_dest = st.multiselect("🔗 Send 'SW' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="sw_dest")
+                
                 if st.button("Calculate Water Saturation (Sw)"):
+                    # 1. Calculate the curve parameters
                     f_factor = a_val / (df_filtered[poro_input] ** m_val)
-                    df_filtered['SW'] = ((f_factor * rw_val) / df_filtered[rt_curve]) ** (1/n_val)
-                    df_filtered['SW'] = df_filtered['SW'].clip(0, 1)
-                    st.session_state.df['SW'] = df_filtered['SW']
+                    calculated_sw = (((f_factor * rw_val) / df_filtered[rt_curve]) ** (1/n_val)).clip(0, 1)
+                    
+                    # 2. Save directly to master_log_df to clear the security filter
+                    st.session_state.master_log_df['SW'] = calculated_sw
+                    df_filtered['SW'] = calculated_sw
+                    
+                    # 3. Route it to selected viewers
                     route_calculated_curve('SW', sw_dest)
-                    st.success("✅ Water Saturation Calculated!")
+                    st.success("✅ Water Saturation Calculated & Saved permanently!")
+                    
+                    # 4. Generate the persistent plot
                     fig_sw = go.Figure()
                     fig_sw.add_trace(go.Scatter(x=df_filtered['SW'], y=df_filtered['DEPTH'], mode='lines', line=dict(color=sw_color, width=1.5), fill='tozerox', fillcolor='rgba(0, 206, 209, 0.3)'))
                     fig_sw.update_layout(plot_bgcolor='white', height=600, margin=dict(t=150, b=20, l=50, r=20),
                         legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
                         xaxis=dict(title="Water Saturation (SW)", side="top", range=[sw_xmin, sw_xmax], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"),
                         yaxis=dict(title="Depth (m)", range=[sw_depth[1], sw_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black"))
-                    st.plotly_chart(fig_sw, use_container_width=True)
+                    
+                    # 5. Cache the figure and trigger application rerun
                     st.session_state['fig_sw'] = fig_sw
+                    st.rerun()
+
+                # Display the chart safely outside the execution frame
+                if 'fig_sw' in st.session_state:
+                    st.plotly_chart(st.session_state['fig_sw'], use_container_width=True)
             
             st.markdown("---")
 
@@ -1097,6 +1204,7 @@ if uploaded_file is not None:
                     res_color = set1.color_picker("Flag Color", res_defaults["col"], key="eval_col_RES")
                     res_depth = set2.slider("Depth Range (Flag)", min_value=depth_range[0], max_value=depth_range[1], value=res_defaults["depth"], key="eval_depth_RES")
 
+                # 🔗 Limited routing options specifically for the flag!
                 res_dest = st.multiselect("🔗 Send 'RES_FLAG' to viewers:", ["Multi-Track Viewer"], default=["Multi-Track Viewer"], key="res_dest")
 
                 if st.button("Generate Reservoir Flag"):
@@ -1112,14 +1220,18 @@ if uploaded_file is not None:
                     cond_vsh = apply_operator(res_vsh_op_str, df_filtered[res_vsh_curve], res_vsh_cutoff)
                     cond_sw = apply_operator(res_sw_op_str, df_filtered[res_sw_curve], res_sw_cutoff)
 
-                    # Create Flag: 1 if both conditions met, else 0
-                    df_filtered['RES_FLAG'] = np.where(cond_vsh & cond_sw, 1, 0)
-                    st.session_state.df['RES_FLAG'] = df_filtered['RES_FLAG']
-                    route_calculated_curve('RES_FLAG', res_dest)
+                    # 1. Create Flag: 1 if both conditions met, else 0
+                    calculated_flag = np.where(cond_vsh & cond_sw, 1, 0)
                     
-                    st.success(f"✅ Reservoir Flag Generated!")
+                    # 2. Save securely to master_log_df
+                    st.session_state.master_log_df['RES_FLAG'] = calculated_flag
+                    df_filtered['RES_FLAG'] = calculated_flag
+                    
+                    # 3. Route to Multi-Track Viewer
+                    route_calculated_curve('RES_FLAG', res_dest)
+                    st.success(f"✅ Reservoir Flag Generated & Saved permanently!")
 
-                    # Plotting Blocky Flag
+                    # 4. Create and update plot
                     fig_res = go.Figure()
                     fig_res.add_trace(go.Scatter(
                         x=df_filtered['RES_FLAG'], 
@@ -1137,9 +1249,15 @@ if uploaded_file is not None:
                         xaxis=dict(title="Reservoir Flag", side="top", range=[0, 1.2], showgrid=False, zeroline=False, dtick=1, linecolor="black", mirror=True),
                         yaxis=dict(title="Depth (m)", range=[res_depth[1], res_depth[0]], showgrid=True, gridcolor="lightgrey", griddash="dash", mirror=True, showline=True, linecolor="black")
                     )
-                    st.plotly_chart(fig_res, use_container_width=True)
+                    
+                    # 5. Cache it and refresh
                     st.session_state['fig_res'] = fig_res
+                    st.rerun()
 
+                # Display the chart safely
+                if 'fig_res' in st.session_state:
+                    st.plotly_chart(st.session_state['fig_res'], use_container_width=True)
+            
             st.markdown("---")
 
             # --- 9. ROCK PHYSICS & IMPEDANCE PROFILES ---
@@ -1156,20 +1274,26 @@ if uploaded_file is not None:
             with rp_c4: 
                 color_curve = st.selectbox("Color Code By (Porosity):", phi_options if phi_options else available_curves, key="rp_color_sel")
             with rp_c5:
-                rp_dest = st.multiselect("🔗 Send Impedances to viewers:", ["Multi-Track Viewer", "Recorded Logs", "Smoothed Logs"], default=["Multi-Track Viewer"], key="rp_dest")
+                rp_dest = st.multiselect("🔗 Send Impedances to viewers:", ["Multi-Track Viewer", "Recorded Logs", "Smoothed Logs"], default=["Multi-Track Viewer", "Recorded Logs", "Smoothed Logs"], key="rp_dest")
 
             if st.button("Calculate Impedances & Plot Profiles"):
-                df_filtered['ACOUSTIC_IMP'] = df_filtered[vp_curve] * df_filtered[den_curve]
-                df_filtered['SHEAR_IMP'] = df_filtered[vs_curve] * df_filtered[den_curve]
+                # 1. Perform the calculations
+                calculated_ai = df_filtered[vp_curve] * df_filtered[den_curve]
+                calculated_si = df_filtered[vs_curve] * df_filtered[den_curve]
                 
-                st.session_state.df['ACOUSTIC_IMP'] = df_filtered['ACOUSTIC_IMP']
-                st.session_state.df['SHEAR_IMP'] = df_filtered['SHEAR_IMP']
+                # 2. Save both permanently into master_log_df to escape cleaning cycles
+                st.session_state.master_log_df['ACOUSTIC_IMP'] = calculated_ai
+                st.session_state.master_log_df['SHEAR_IMP'] = calculated_si
+                df_filtered['ACOUSTIC_IMP'] = calculated_ai
+                df_filtered['SHEAR_IMP'] = calculated_si
                 
+                # 3. Route both parameters to the selected logs / viewers
                 route_calculated_curve('ACOUSTIC_IMP', rp_dest)
                 route_calculated_curve('SHEAR_IMP', rp_dest)
                 
-                st.success("✅ Acoustic and Shear Impedances Calculated Successfully!")
+                st.success("✅ Acoustic and Shear Impedances Calculated & Saved permanently across selected tabs!")
                 
+                # 4. Generate the persistent subplot figure
                 fig_rp = make_subplots(
                     rows=1, cols=5, shared_yaxes=True, horizontal_spacing=0.02,
                     subplot_titles=("Vp Profile", "Vs Profile", "Acoustic Impedance", "Shear Impedance", "Density Profile")
@@ -1209,11 +1333,16 @@ if uploaded_file is not None:
                     legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)") 
                 )
                 
-                st.plotly_chart(fig_rp, use_container_width=True)
+                # 5. Cache the layout state and refresh
                 st.session_state['fig_rp'] = fig_rp
+                st.rerun()
+
+            # Render plot safely outside the execution scope so it doesn't vanish
+            if 'fig_rp' in st.session_state:
+                st.plotly_chart(st.session_state['fig_rp'], use_container_width=True)
 
             st.markdown("---")
-
+            
             # --- 10. NET PAY CUTOFFS ---
             st.markdown("#### 10. Net Pay Cutoffs")
             poro_candidates = [col for col in df_filtered.columns if 'PHI' in col.upper()]
@@ -1285,9 +1414,7 @@ if uploaded_file is not None:
         import base64
         import os
         from fpdf import FPDF
-        
-        # 1. Premium FPDF Generation Blueprint
-        # --- TAB 10: REPORT GENERATOR ---
+
         with tab_report:  
             
             class PremiumPetrophysicsReport(FPDF):
@@ -1361,7 +1488,7 @@ if uploaded_file is not None:
                         self.cell(0, 7, f"  [Log image profile compiled via system cache. Engine status offline: {e}]", ln=1)
                         self.ln(2)
 
-            # 2. Execution Interface (NOW PROPERLY INDENTED)
+            # Execution Interface
             st.markdown("### 📄 Enterprise Report Generation Hub")
             st.markdown("Compile all operations, LAS text headings, custom smoothing logs, and complete 10-track Formation Evaluations into a structured asset dossier.")
 
@@ -1382,24 +1509,29 @@ if uploaded_file is not None:
                     # --- SECTION 2: CORE SIGNAL PROCESSING LOGS ---
                     pdf.add_main_heading("2. Core Signal Processing Logs")
                     
-                    # Fix: Loop through ALL Recorded Logs charts
+                    # Loop through ALL Recorded Logs charts
                     if 'recorded_logs_figs_list' in st.session_state and len(st.session_state['recorded_logs_figs_list']) > 0:
                         pdf.add_sub_heading("2.1 Baseline Recorded Signal Array")
                         for idx, rec_fig in enumerate(st.session_state['recorded_logs_figs_list']):
                             pdf.add_plotly_track(rec_fig)
 
-                    # Fix: Loop through ALL Smoothed Logs charts
+                    # Loop through ALL Smoothed Logs charts
                     if 'smoothed_logs_figs_list' in st.session_state and len(st.session_state['smoothed_logs_figs_list']) > 0:
                         pdf.add_sub_heading("2.2 De-noised / Smoothed Evaluation Signal Array")
                         for idx, sm_fig in enumerate(st.session_state['smoothed_logs_figs_list']):
                             pdf.add_plotly_track(sm_fig)
 
-                    # Fix: Loop through ALL Histogram charts
+                    # Loop through ALL Histogram charts
                     if 'histogram_figs_list' in st.session_state and len(st.session_state['histogram_figs_list']) > 0:
                         pdf.add_sub_heading("2.3 Data Distribution Diagnostics (Histograms)")
                         for idx, hist_fig in enumerate(st.session_state['histogram_figs_list']):
                             pdf.add_plotly_track(hist_fig)
 
+                    # ✅ THIS IS WHAT PULLS THE MULTI-TRACK VIEWER INTO THE REPORT
+                    if 'multi_track_fig' in st.session_state:
+                        pdf.add_sub_heading("2.4 Unified Composite Multi-Track Viewer Profile")
+                        pdf.add_plotly_track(st.session_state['multi_track_fig'])
+                        
                     # --- SECTION 3: FORMATION EVALUATION (ALL 10 TRACKS) ---
                     pdf.add_main_heading("3. Advanced Formation Evaluation Suite")
                     
@@ -1455,7 +1587,7 @@ if uploaded_file is not None:
                         st.markdown(download_href, unsafe_allow_html=True)
                     except Exception as e:
                         st.error(f"Asset compiling fault detected: {e}")
-
+                        
         # --- EXPORT DATA ENGINE ---
         st.sidebar.markdown("---")
         st.sidebar.header("💾 Export Data")
@@ -1511,19 +1643,19 @@ else:
             """
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 20px; margin-bottom: 25px;">
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;">📊</span>
                     <span style="font-weight: bold; font-size: 1rem;">Multi-Track Logs</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;">📈</span>
                     <span style="font-weight: bold; font-size: 1rem;">Crossplot Maps</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;">➗</span>
                     <span style="font-weight: bold; font-size: 1rem;">Petrophysical Math</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;">🤖</span>
                     <span style="font-weight: bold; font-size: 1rem;">Machine Learning</span>
                 </div>
             </div>
@@ -1542,7 +1674,7 @@ else:
             st.markdown(
                 """
                 <div style="background-color: rgba(128, 128, 128, 0.08); height: 320px; border-radius: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px dashed rgba(128, 128, 128, 0.25); text-align: center; padding: 20px;">
-                    <span style="font-size: 50px; margin-bottom: 10px;"></span>
+                    <span style="font-size: 50px; margin-bottom: 10px;">🏗️</span>
                     <h4 style="margin: 5px 0; opacity: 0.8;">Asset Placeholder: rig.jpg</h4>
                     <p style="opacity: 0.6; max-width: 280px; font-size: 0.85rem; line-height: 1.4;">
                         Place your rig photo file inside the 'petapp' folder directory to automatically load platform graphics here!
