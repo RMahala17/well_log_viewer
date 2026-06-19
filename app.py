@@ -15,7 +15,6 @@ from sklearn.ensemble import RandomForestRegressor
 
 import requests
 import json
-
 # --- 🤖 LLOCAL AI ENGINE ---
 def query_local_llama(chat_history, system_context, model_name="llama3.1"):
     """Sends chat history and optional images to local Ollama instance securely."""
@@ -39,6 +38,37 @@ def query_local_llama(chat_history, system_context, model_name="llama3.1"):
             return f"Ollama Connection Error: Status {response.status_code}."
     except Exception as e:
         return f"Local Engine Offline. Please check your terminal. Error: {e}"
+
+def check_ollama_status():
+    """Safely checks if Ollama is running locally and inspects installed models."""
+    url = "http://localhost:11434/api/tags"
+    required_models = ["llama3.1", "moondream"]
+    missing_models = ["llama3.1", "moondream"]
+    
+    try:
+        # Quick 1-second timeout so it never freezes the UI if Ollama is completely shut down
+        response = requests.get(url, timeout=1.0)
+        if response.status_code == 200:
+            installed_data = response.json().get("models", [])
+            # Collect all names downcased (handles tags like 'llama3.1:latest')
+            installed_names = [m.get("name", "").lower() for m in installed_data]
+            
+            # Scan inventory for our models
+            for name in installed_names:
+                if "llama3.1" in name and "llama3.1" in missing_models:
+                    missing_models.remove("llama3.1")
+                if "moondream" in name and "moondream" in missing_models:
+                    missing_models.remove("moondream")
+            
+            if not missing_models:
+                return {"status": "ready", "missing": []}
+            else:
+                return {"status": "missing_models", "missing": missing_models}
+        else:
+            return {"status": "offline", "missing": required_models}
+    except Exception:
+        # If connection fails completely, the engine server is offline
+        return {"status": "offline", "missing": required_models}
 
 # Initialize Chat Memory
 if 'ai_chat_history' not in st.session_state:
@@ -1630,124 +1660,135 @@ if uploaded_file is not None:
         csv = df_filtered.to_csv(index=False).encode('utf-8')
         st.sidebar.download_button(label="⬇️ Download Processed Data (CSV)", data=csv, file_name=f"{well_name}_processed.csv", mime='text/csv')
        
-        # --- 🤖 AI COPILOT SIDEBAR ENGINE ---
+       # --- 🤖 MASTER COPIOT TOGGLE CONTROL ---
         st.sidebar.markdown("---")
-        st.sidebar.header("🤖 Llama 3.1 Petrophysics Copilot")
-        st.sidebar.info("I am scanning your active well logs. Ask me anything!")
-
-        # 1. Background Scanner: Read the current data to feed to Llama
-        stats_summary = df_filtered.describe().to_string()
-        available_curves = list(df_filtered.columns)
-        system_copilot_instruction = f"""
-        You are an expert real-time AI Subsurface Geophysics and Petrophysical Asset Copilot.
-        The user is currently analyzing a well log named: {well_name}.
-        The current depth range being analyzed is: {depth_range[0]} to {depth_range[1]} meters.
-        Available Log Curves: {available_curves}
-        
-        Here are the basic statistics (min, max, mean) of their current data:
-        {stats_summary}
-        
-        Instructions:
-        1. If the user asks about their data, use the statistics above to answer accurately.
-        2. Answer general geophysics, petrophysics, and geology questions professionally.
-        3. Keep answers concise, helpful, and formatting clean.
+        st.sidebar.subheader("🤖 AI Petrophysics Copilot")
+        copilot_enabled = st.sidebar.toggle("Activate AI Copilot", value=False, help="Turn on to activate local AI assistance for text and screenshot diagnostics.")
+        # Define the AI's core instructions and personality
+        system_copilot_instruction = """
+        You are an expert Petrophysics AI Copilot integrated into an advanced well log dashboard. 
+        Your job is to help users analyze well log data, interpret crossplots, evaluate fluid saturations, and read dashboard charts. 
+        Be concise, accurate, and highly technical. If looking at an image, focus carefully on data lines, curves, grid scales, and highlighted anomalies.
         """
 
-        # 2. Display Chat History in Sidebar
-        chat_container = st.sidebar.container(height=400)
-        with chat_container:
-            for message in st.session_state['ai_chat_history']:
-                if message["role"] == "user":
-                    st.markdown(f"**🧑‍💻 You:** {message['content']}")
-                    if "images" in message:
-                        st.markdown("*(📎 Image Attached)*")
-                else:
-                    st.markdown(f"**🤖 AI:** {message['content']}")
-                    st.markdown("---")
-
-        # 3. Chat Input Box & Image Attachment Uploader
-        st.sidebar.caption("💡 **Tip:** Click *inside* the dashed box below until it highlights, then press `Ctrl+V` to paste. You can upload multiple files!")
-        
-        # Accept multiple files (2, 3, 4... as many as you want)
-        uploaded_imgs = st.sidebar.file_uploader("📎 Attach Image(s)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-        
-        user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
-        
-        if user_query:
-            if uploaded_imgs:  # If you uploaded ANY number of images
-                combined_ai_response = ""
-                total_images = len(uploaded_imgs)
-                
-                # Loop through 1st, 2nd, 3rd, 4th image... in the exact order they were uploaded
-                for idx, uploaded_img in enumerate(uploaded_imgs, start=1):
-                    with st.sidebar.spinner(f"Analyzing Image {idx} of {total_images} with moondream..."):
-                        
-                        # --- MEMORY SAFE VISION PROCESSING ---
-                        # 1. Open the current image
-                        img = Image.open(uploaded_img)
-                        
-                        # 2. Convert to RGB (prevents errors with transparent PNGs)
-                        if img.mode != 'RGB':
-                            img = img.convert('RGB')
-                            
-                        # 3. Shrink the image so it doesn't crash the local AI's memory
-                        img.thumbnail((800, 800)) 
-                        
-                        # 4. Save to a temporary buffer as a lightweight JPEG
-                        buffered = io.BytesIO()
-                        img.save(buffered, format="JPEG", quality=85)
-                        
-                        # 5. Convert the lightweight image to Base64
-                        img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                        
-                        # Create a single temporary message context for THIS specific image
-                        # Added explicit instructions for Moondream to look for numbers and colors carefully
-                        enhanced_prompt = f"Please look extremely closely at the text, numbers, and UI elements in this image to answer the user's request accurately: {user_query}"
-                        single_image_message = [{
-                            "role": "user",
-                            "content": enhanced_prompt,
-                            "images": [img_b64]
-                        }]
-                        
-                        # Query moondream for this specific image
-                        img_response = query_local_llama(
-                            chat_history=single_image_message,
-                            system_context=system_copilot_instruction,
-                            model_name="moondream"
-                        )
-                        
-                        # Add this image's specific analysis to our master list, line by line
-                        combined_ai_response += f"### 📊 Analysis for Image {idx} ({uploaded_img.name}):\n{img_response}\n\n---\n\n"
-                
-                # Once ALL images are processed, append the final user message to the chat history
-                st.session_state['ai_chat_history'].append({
-                    "role": "user", 
-                    "content": user_query,
-                    "images": [base64.b64encode(u.getvalue()).decode("utf-8") for u in uploaded_imgs]
-                })
-                
-                # Save the complete, line-by-line combined analysis to the chat history
-                st.session_state['ai_chat_history'].append({"role": "assistant", "content": combined_ai_response})
-                st.rerun()
-                
-            else:
-                # Standard text-only message path
-                st.session_state['ai_chat_history'].append({"role": "user", "content": user_query})
-                active_model = "llama3.1" 
-                
-                with st.sidebar.spinner(f"Analyzing with {active_model}..."):
-                    ai_response = query_local_llama(
-                        chat_history=st.session_state['ai_chat_history'], 
-                        system_context=system_copilot_instruction,
-                        model_name=active_model
-                    )
-                
-                st.session_state['ai_chat_history'].append({"role": "assistant", "content": ai_response})
-                st.rerun()
+        if copilot_enabled:
+            # Run our live background verification check
+            ollama_info = check_ollama_status()
             
-        if st.sidebar.button("🗑️ Clear Chat History"):
-            st.session_state['ai_chat_history'] = []
-            st.rerun()
+            if ollama_info["status"] == "offline":
+                # Scenario A: Ollama server is completely shut down or not installed
+                st.sidebar.error("❌ **Ollama Engine Offline**")
+                st.sidebar.markdown(
+                    """
+                    The AI Copilot requires the Ollama engine running on your computer.
+                    
+                    **How to fix:**
+                    1. Download & install **Ollama** from [ollama.com](https://ollama.com/)
+                    2. Launch the Ollama desktop application.
+                    3. Open your terminal and download the required models using the instructions below.
+                    """
+                )
+                # Show explicit download commands anyway so they can prep
+                st.sidebar.info("📋 **Terminal Commands to Run:**")
+                st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
+                
+                if st.sidebar.button("🔄 Re-check Connection"):
+                    st.rerun()
+                    
+            elif ollama_info["status"] == "missing_models":
+                # Scenario B: Ollama is awake, but one or both models are missing
+                st.sidebar.warning("⚠️ **Missing Required Models**")
+                st.sidebar.write("Ollama is running, but you are missing the models needed for this app:")
+                
+                # Dynamically generate terminal strings depending on exactly what is missing
+                st.sidebar.info("📋 Open your terminal and copy-paste these commands:")
+                for missing in ollama_info["missing"]:
+                    st.sidebar.code(f"ollama pull {missing}", language="bash")
+                
+                st.sidebar.caption("The app will automatically unlock once the downloads reach 100% in your terminal.")
+                if st.sidebar.button("🔄 Check Download Progress"):
+                    st.rerun()
+                    
+            else:
+                # Scenario C: Status is "ready"! Unlock full features seamlessly.
+                st.sidebar.success("✅ **AI Copilot Connected & Ready**")
+                
+                # 2. Display Chat History in Sidebar
+                chat_container = st.sidebar.container(height=350)
+                with chat_container:
+                    for message in st.session_state['ai_chat_history']:
+                        if message["role"] == "user":
+                            st.markdown(f"**🧑‍💻 You:** {message['content']}")
+                            if "images" in message:
+                                st.markdown(f"*(📎 {len(message['images'])} Image(s) Attached)*")
+                        else:
+                            st.markdown(f"**🤖 AI:** {message['content']}")
+                            st.markdown("---")
+
+                # 3. Chat Input Box & Image Attachment Uploader
+                st.sidebar.caption("💡 **Tip:** Click *inside* the box below until highlighted, then press `Ctrl+V` to paste screenshots.")
+                uploaded_imgs = st.sidebar.file_uploader("📎 Attach Image(s)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+                
+                user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
+                
+                if user_query:
+                    if uploaded_imgs:  
+                        combined_ai_response = ""
+                        total_images = len(uploaded_imgs)
+                        
+                        for idx, uploaded_img in enumerate(uploaded_imgs, start=1):
+                            with st.sidebar.spinner(f"Analyzing Image {idx} of {total_images} with moondream..."):
+                                img = Image.open(uploaded_img)
+                                if img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                                    
+                                img.thumbnail((800, 800)) 
+                                buffered = io.BytesIO()
+                                img.save(buffered, format="JPEG", quality=85)
+                                img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                                
+                                enhanced_prompt = f"Please look extremely closely at the text, numbers, and UI elements in this image to answer the user's request accurately: {user_query}"
+                                single_image_message = [{
+                                    "role": "user",
+                                    "content": enhanced_prompt,
+                                    "images": [img_b64]
+                                }]
+                                
+                                img_response = query_local_llama(
+                                    chat_history=single_image_message,
+                                    system_context=system_copilot_instruction,
+                                    model_name="moondream"
+                                )
+                                combined_ai_response += f"### 📊 Analysis for Image {idx} ({uploaded_img.name}):\n{img_response}\n\n---\n\n"
+                        
+                        st.session_state['ai_chat_history'].append({
+                            "role": "user", 
+                            "content": user_query,
+                            "images": [base64.b64encode(u.getvalue()).decode("utf-8") for u in uploaded_imgs]
+                        })
+                        st.session_state['ai_chat_history'].append({"role": "assistant", "content": combined_ai_response})
+                        st.rerun()
+                        
+                    else:
+                        st.session_state['ai_chat_history'].append({"role": "user", "content": user_query})
+                        active_model = "llama3.1" 
+                        
+                        with st.sidebar.spinner(f"Analyzing with {active_model}..."):
+                            ai_response = query_local_llama(
+                                chat_history=st.session_state['ai_chat_history'], 
+                                system_context=system_copilot_instruction,
+                                model_name=active_model
+                            )
+                        
+                        st.session_state['ai_chat_history'].append({"role": "assistant", "content": ai_response})
+                        st.rerun()
+                    
+                if st.sidebar.button("🗑️ Clear Chat History"):
+                    st.session_state['ai_chat_history'] = []
+                    st.rerun()
+        else:
+            # If the toggle is OFF, display a clean status note
+            st.sidebar.info("💡 AI Copilot is currently deactivated. The main analytics engine is running in standalone mode.")
             
     except Exception as e:
         st.error(f"Error reading LAS file: {e}")
