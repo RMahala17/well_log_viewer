@@ -240,17 +240,46 @@ def route_calculated_curve(curve_name, destinations):
 
 # 2. Sidebar Layout & Data Loading
 st.sidebar.header("📁 Data Loading")
-uploaded_file = st.sidebar.file_uploader("Upload LAS File", type=['las'])
+# --- 📂 DUAL FILE UPLOADER ENGINE ---
+
+# 1. Custom File Upload
+uploaded_file = st.sidebar.file_uploader("Upload Your LAS File", type=['las'])
+
+# Divider or spacing
+st.sidebar.markdown("<div style='text-align: center; margin: 5px 0; opacity: 0.5;'>— OR —</div>", unsafe_allow_html=True)
+
+# 2. Demo File Checkbox Toggle
+use_demo_data = st.sidebar.checkbox(" Use Demo Well Data", value=False, help="Click to instantly parse and load pre-packaged Ichthys Deep-1 offshore wireline well logs.")
+
+# Master Controller: Decide which file pointer to feed into the processing engine
+las_file_source = None
 
 if uploaded_file is not None:
-    st.sidebar.success("File uploaded successfully!")
-    
+    las_file_source = uploaded_file
+    st.sidebar.success("✅ Custom LAS file loaded successfully!")
+elif use_demo_data:
+    demo_path = "ichthys_deep_1_wire_public_2010_sdb.las"  # Ensure the file is named this inside your project folder
+    if os.path.exists(demo_path):
+        las_file_source = demo_path
+        st.sidebar.success("⚡ Demo Well (Ichthys Deep-1) active!")
+    else:
+        st.sidebar.error("❌ 'demo_well.las' not found in your directory. Please check file path assets.")
+
+if las_file_source is not None:
     try:
+        # Determine the correct filename to track in session state
+        current_filename = uploaded_file.name if uploaded_file is not None else "demo_well.las"
+
         # --- ROBUST DATA HANDLING WITH SESSION STATE ---
-        if 'uploaded_filename' not in st.session_state or st.session_state.uploaded_filename != uploaded_file.name:
-            string_data = uploaded_file.getvalue().decode("utf-8")
-            las = lasio.read(string_data)
+        if 'uploaded_filename' not in st.session_state or st.session_state.uploaded_filename != current_filename:
             
+            # DYNAMIC PARSING: Handle both local demo file paths and uploaded file buffers
+            if isinstance(las_file_source, str):
+                las = lasio.read(las_file_source)
+            else:
+                string_data = las_file_source.getvalue().decode("utf-8")
+                las = lasio.read(string_data)
+                
             df = las.df()
             df['DEPTH'] = df.index 
             cols = ['DEPTH'] + [col for col in df.columns if col != 'DEPTH']
@@ -258,7 +287,7 @@ if uploaded_file is not None:
             
             st.session_state.df = df
             st.session_state.las = las
-            st.session_state.uploaded_filename = uploaded_file.name
+            st.session_state.uploaded_filename = current_filename
             
             # Initialize global curves list
             st.session_state.available_curves = [col for col in df.columns if col != 'DEPTH']
@@ -1726,7 +1755,7 @@ if uploaded_file is not None:
                             st.markdown("---")
 
                 # 3. Chat Input Box & Image Attachment Uploader
-                st.sidebar.caption("💡 **Tip:** Click *inside* the box below until highlighted, then press `Ctrl+V` to paste screenshots.")
+                #st.sidebar.caption("💡 **Tip:** Click *inside* the box below until highlighted, then press `Ctrl+V` to paste screenshots.")
                 uploaded_imgs = st.sidebar.file_uploader("📎 Attach Image(s)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
                 
                 user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
@@ -1839,19 +1868,19 @@ else:
             """
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 20px; margin-bottom: 25px;">
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">📊</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Multi-Track Logs</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">📈</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Crossplot Maps</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">➗</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Petrophysical Math</span>
                 </div>
                 <div style="background-color: rgba(128, 128, 128, 0.1); padding: 15px; border-radius: 10px; border: 1px solid rgba(128, 128, 128, 0.2); display: flex; align-items: center;">
-                    <span style="font-size: 1.3rem; margin-right: 10px;">🤖</span>
+                    <span style="font-size: 1.3rem; margin-right: 10px;"></span>
                     <span style="font-weight: bold; font-size: 1rem;">Machine Learning</span>
                 </div>
             </div>
