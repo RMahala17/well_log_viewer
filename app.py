@@ -16,20 +16,16 @@ from sklearn.ensemble import RandomForestRegressor
 import requests
 import json
 # --- 🤖 LLOCAL AI ENGINE ---
+# --- 🤖 LOCAL AI ENGINE (Client-Side Aware) ---
+import streamlit.components.v1 as components
+
 def query_local_llama(chat_history, system_context, model_name="llama3.1"):
-    """Sends chat history and optional images to local Ollama instance securely."""
+    """Sends chat history to the user's LOCAL Ollama via sidebar JS bridge result."""
     url = "http://localhost:11434/api/chat"
-    
     messages = [{"role": "system", "content": system_context}] + chat_history
-    
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "stream": False
-    }
+    payload = {"model": model_name, "messages": messages, "stream": False}
     try:
-        # Changed timeout=120 to timeout=None so it waits forever for Moondream to finish
-        response = requests.post(url, json=payload, timeout=None) 
+        response = requests.post(url, json=payload, timeout=None)
         if response.status_code == 200:
             return response.json().get("message", {}).get("content", "Error generating response.")
         elif response.status_code == 404:
@@ -37,39 +33,101 @@ def query_local_llama(chat_history, system_context, model_name="llama3.1"):
         else:
             return f"Ollama Connection Error: Status {response.status_code}."
     except Exception as e:
-        return f"Local Engine Offline. Please check your terminal. Error: {e}"
+        return f"❌ Local Engine Offline. Please check your terminal. Error: {e}"
+
 
 def check_ollama_status():
-    """Safely checks if Ollama is running locally and inspects installed models."""
-    url = "http://localhost:11434/api/tags"
+    """
+    Checks Ollama on the USER'S local machine using a JS bridge via Streamlit query params.
+    Returns: dict with 'status' key: 'ready' | 'missing_models' | 'offline'
+    """
     required_models = ["llama3.1", "moondream"]
-    missing_models = ["llama3.1", "moondream"]
-    
+
+    # Read result injected by JS bridge (stored in query param 'ollama_status')
+    params = st.query_params
+    raw = params.get("ollama_status", "")
+
+    if not raw:
+        return {"status": "checking", "missing": required_models}
+
     try:
-        # Quick 1-second timeout so it never freezes the UI if Ollama is completely shut down
-        response = requests.get(url, timeout=1.0)
-        if response.status_code == 200:
-            installed_data = response.json().get("models", [])
-            # Collect all names downcased (handles tags like 'llama3.1:latest')
-            installed_names = [m.get("name", "").lower() for m in installed_data]
-            
-            # Scan inventory for our models
-            for name in installed_names:
-                if "llama3.1" in name and "llama3.1" in missing_models:
-                    missing_models.remove("llama3.1")
-                if "moondream" in name and "moondream" in missing_models:
-                    missing_models.remove("moondream")
-            
-            if not missing_models:
-                return {"status": "ready", "missing": []}
-            else:
-                return {"status": "missing_models", "missing": missing_models}
-        else:
-            return {"status": "offline", "missing": required_models}
+        data = json.loads(raw)
+        status = data.get("status", "offline")
+        missing = data.get("missing", required_models)
+        return {"status": status, "missing": missing}
     except Exception:
-        # If connection fails completely, the engine server is offline
         return {"status": "offline", "missing": required_models}
 
+
+def render_ollama_detector():
+    """
+    Injects a JS component that pings the user's LOCAL Ollama (localhost:11434),
+    checks for required models, and writes the result back to Streamlit via URL query params.
+    This runs 100% in the user's browser — works even on streamlit.app cloud hosting.
+    """
+    required_models_js = json.dumps(["llama3.1", "moondream"])
+
+    js_code = f"""
+    <script>
+    (async function() {{
+        const requiredModels = {required_models_js};
+
+        async function checkOllama() {{
+            try {{
+                const resp = await fetch("http://localhost:11434/api/tags", {{
+                    method: "GET",
+                    signal: AbortSignal.timeout(2500)
+                }});
+
+                if (!resp.ok) {{
+                    pushStatus({{status: "offline", missing: requiredModels}});
+                    return;
+                }}
+
+                const data = await resp.json();
+                const installed = (data.models || []).map(m => m.name.toLowerCase());
+
+                let missing = [];
+                for (const req of requiredModels) {{
+                    const found = installed.some(name => name.includes(req.toLowerCase()));
+                    if (!found) missing.push(req);
+                }}
+
+                if (missing.length === 0) {{
+                    pushStatus({{status: "ready", missing: []}});
+                }} else {{
+                    pushStatus({{status: "missing_models", missing: missing}});
+                }}
+
+            }} catch(e) {{
+                pushStatus({{status: "offline", missing: requiredModels}});
+            }}
+        }}
+
+        function pushStatus(result) {{
+            try {{
+                const encoded = encodeURIComponent(JSON.stringify(result));
+                const url = new URL(window.parent.location.href);
+                const current = url.searchParams.get("ollama_status");
+                const next = JSON.stringify(result);
+                // Only push if state actually changed to avoid infinite reruns
+                if (current !== next) {{
+                    url.searchParams.set("ollama_status", next);
+                    window.parent.history.replaceState(null, '', url.toString());
+                    // Trigger Streamlit rerun by posting a message
+                    window.parent.postMessage({{type: "streamlit:setComponentValue", value: next}}, "*");
+                }}
+            }} catch(e) {{}}
+        }}
+
+        await checkOllama();
+        // Re-check every 5 seconds so app auto-unlocks after model download completes
+        setInterval(checkOllama, 5000);
+    }})();
+    </script>
+    """
+    components.html(js_code, height=0, width=0)
+    
 # Initialize Chat Memory
 if 'ai_chat_history' not in st.session_state:
     st.session_state['ai_chat_history'] = []
@@ -1690,11 +1748,14 @@ if las_file_source is not None:
         csv = df_filtered.to_csv(index=False).encode('utf-8')
         st.sidebar.download_button(label="⬇️ Download Processed Data (CSV)", data=csv, file_name=f"{well_name}_processed.csv", mime='text/csv')
        
-       # --- 🤖 MASTER COPIOT TOGGLE CONTROL ---
+       # --- 🤖 MASTER COPILOT TOGGLE CONTROL ---
         st.sidebar.markdown("---")
         st.sidebar.subheader("🤖 AI Petrophysics Copilot")
-        copilot_enabled = st.sidebar.toggle("Activate AI Copilot", value=False, help="Turn on to activate local AI assistance for text and screenshot diagnostics.")
-        # Define the AI's core instructions and personality
+        copilot_enabled = st.sidebar.toggle(
+            "Activate AI Copilot", value=False,
+            help="Turn on to activate local AI assistance. Requires Ollama running on YOUR computer."
+        )
+
         system_copilot_instruction = """
         You are an expert Petrophysics AI Copilot integrated into an advanced well log dashboard. 
         Your job is to help users analyze well log data, interpret crossplots, evaluate fluid saturations, and read dashboard charts. 
@@ -1702,48 +1763,54 @@ if las_file_source is not None:
         """
 
         if copilot_enabled:
-            # Run our live background verification check
+            # Always inject the JS detector — it runs in the user's browser silently
+            render_ollama_detector()
+
             ollama_info = check_ollama_status()
-            
-            if ollama_info["status"] == "offline":
-                # Scenario A: Ollama server is completely shut down or not installed
-                st.sidebar.error("❌ **Ollama Engine Offline**")
+
+            if ollama_info["status"] == "checking":
+                st.sidebar.info("🔍 **Detecting Ollama on your computer...** (takes 2-3 seconds)")
+                st.sidebar.caption("If this stays here, click **Re-check** below.")
+                if st.sidebar.button("🔄 Re-check Connection"):
+                    # Clear stale query param and rerun
+                    st.query_params.pop("ollama_status", None)
+                    st.rerun()
+
+            elif ollama_info["status"] == "offline":
+                st.sidebar.error("❌ **Ollama Not Detected on Your Computer**")
                 st.sidebar.markdown(
                     """
-                    The AI Copilot requires the Ollama engine running on your computer.
-                    
-                    **How to fix:**
-                    1. Download & install **Ollama** from [ollama.com](https://ollama.com/)
-                    2. Launch the Ollama desktop application.
-                    3. Open your terminal and download the required models using the instructions below.
+                    The AI Copilot needs **Ollama** installed and running **on your own computer** — 
+                    it does NOT run on the cloud server.
+
+                    **Steps to get started:**
+                    1. Download & install **Ollama** → [ollama.com](https://ollama.com/)
+                    2. Launch the Ollama desktop app (or run `ollama serve` in your terminal)
+                    3. Open your terminal and run the commands below 👇
                     """
                 )
-                # Show explicit download commands anyway so they can prep
-                st.sidebar.info("📋 **Terminal Commands to Run:**")
+                st.sidebar.info("📋 **Paste these into your terminal:**")
                 st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
-                
-                if st.sidebar.button("🔄 Re-check Connection"):
+                st.sidebar.caption("⏳ The app auto-detects Ollama every 5 seconds. Once Ollama is running, this page will unlock automatically.")
+                if st.sidebar.button("🔄 Re-check Now"):
+                    st.query_params.pop("ollama_status", None)
                     st.rerun()
-                    
+
             elif ollama_info["status"] == "missing_models":
-                # Scenario B: Ollama is awake, but one or both models are missing
-                st.sidebar.warning("⚠️ **Missing Required Models**")
-                st.sidebar.write("Ollama is running, but you are missing the models needed for this app:")
-                
-                # Dynamically generate terminal strings depending on exactly what is missing
-                st.sidebar.info("📋 Open your terminal and copy-paste these commands:")
+                st.sidebar.warning("⚠️ **Ollama Found — Missing Required Models**")
+                st.sidebar.write("Ollama is running on your computer, but these models still need to be downloaded:")
+                st.sidebar.info("📋 **Open your terminal and run:**")
                 for missing in ollama_info["missing"]:
                     st.sidebar.code(f"ollama pull {missing}", language="bash")
-                
-                st.sidebar.caption("The app will automatically unlock once the downloads reach 100% in your terminal.")
+                st.sidebar.caption("⏳ The app checks every 5 seconds. Once your download completes (100% in terminal), the AI Copilot will unlock automatically.")
                 if st.sidebar.button("🔄 Check Download Progress"):
+                    st.query_params.pop("ollama_status", None)
                     st.rerun()
-                    
+
             else:
-                # Scenario C: Status is "ready"! Unlock full features seamlessly.
+                # Status is "ready" — full AI Copilot unlocked
                 st.sidebar.success("✅ **AI Copilot Connected & Ready**")
-                
-                # 2. Display Chat History in Sidebar
+
                 chat_container = st.sidebar.container(height=350)
                 with chat_container:
                     for message in st.session_state['ai_chat_history']:
@@ -1755,69 +1822,65 @@ if las_file_source is not None:
                             st.markdown(f"**🤖 AI:** {message['content']}")
                             st.markdown("---")
 
-                # 3. Chat Input Box & Image Attachment Uploader
-                #st.sidebar.caption("💡 **Tip:** Click *inside* the box below until highlighted, then press `Ctrl+V` to paste screenshots.")
-                uploaded_imgs = st.sidebar.file_uploader("📎 Attach Image(s)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-                
+                uploaded_imgs = st.sidebar.file_uploader(
+                    "📎 Attach Image(s)", type=["png", "jpg", "jpeg"], accept_multiple_files=True
+                )
                 user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
-                
+
                 if user_query:
-                    if uploaded_imgs:  
+                    if uploaded_imgs:
                         combined_ai_response = ""
                         total_images = len(uploaded_imgs)
-                        
+
                         for idx, uploaded_img in enumerate(uploaded_imgs, start=1):
                             with st.sidebar.spinner(f"Analyzing Image {idx} of {total_images} with moondream..."):
                                 img = Image.open(uploaded_img)
                                 if img.mode != 'RGB':
                                     img = img.convert('RGB')
-                                    
-                                img.thumbnail((800, 800)) 
+                                img.thumbnail((800, 800))
                                 buffered = io.BytesIO()
                                 img.save(buffered, format="JPEG", quality=85)
                                 img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                                
+
                                 enhanced_prompt = f"Please look extremely closely at the text, numbers, and UI elements in this image to answer the user's request accurately: {user_query}"
                                 single_image_message = [{
                                     "role": "user",
                                     "content": enhanced_prompt,
                                     "images": [img_b64]
                                 }]
-                                
                                 img_response = query_local_llama(
                                     chat_history=single_image_message,
                                     system_context=system_copilot_instruction,
                                     model_name="moondream"
                                 )
                                 combined_ai_response += f"### 📊 Analysis for Image {idx} ({uploaded_img.name}):\n{img_response}\n\n---\n\n"
-                        
+
                         st.session_state['ai_chat_history'].append({
-                            "role": "user", 
+                            "role": "user",
                             "content": user_query,
                             "images": [base64.b64encode(u.getvalue()).decode("utf-8") for u in uploaded_imgs]
                         })
                         st.session_state['ai_chat_history'].append({"role": "assistant", "content": combined_ai_response})
                         st.rerun()
-                        
+
                     else:
                         st.session_state['ai_chat_history'].append({"role": "user", "content": user_query})
-                        active_model = "llama3.1" 
-                        
+                        active_model = "llama3.1"
+
                         with st.sidebar.spinner(f"Analyzing with {active_model}..."):
                             ai_response = query_local_llama(
-                                chat_history=st.session_state['ai_chat_history'], 
+                                chat_history=st.session_state['ai_chat_history'],
                                 system_context=system_copilot_instruction,
                                 model_name=active_model
                             )
-                        
                         st.session_state['ai_chat_history'].append({"role": "assistant", "content": ai_response})
                         st.rerun()
-                    
+
                 if st.sidebar.button("🗑️ Clear Chat History"):
                     st.session_state['ai_chat_history'] = []
                     st.rerun()
+
         else:
-            # If the toggle is OFF, display a clean status note
             st.sidebar.info("💡 AI Copilot is currently deactivated. The main analytics engine is running in standalone mode.")
             
     except Exception as e:
