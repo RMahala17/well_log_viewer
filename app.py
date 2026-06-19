@@ -1696,43 +1696,29 @@ if las_file_source is not None:
             # Run our live background verification check
             ollama_info = check_ollama_status()
             
-            if ollama_info["status"] == "offline":
-                # Scenario A: Ollama server is completely shut down or not installed
-                st.sidebar.error("❌ **Ollama Engine Offline**")
-                st.sidebar.markdown(
-                    """
-                    The AI Copilot requires the Ollama engine running on your computer.
-                    
-                    **How to fix:**
-                    1. Download & install **Ollama** from [ollama.com](https://ollama.com/)
-                    2. Launch the Ollama desktop application.
-                    3. Open your terminal and download the required models using the instructions below.
-                    """
-                )
-                # Show explicit download commands anyway so they can prep
-                st.sidebar.info("📋 **Terminal Commands to Run:**")
-                st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
+            if ollama_info["status"] == "error":
+                # Matches the Cloud Warning or Offline Error
+                st.sidebar.error("❌ **AI Engine Offline**")
+                st.sidebar.markdown(ollama_info["message"])
+                
+                if "Cloud Version" not in ollama_info["message"]:
+                    st.sidebar.info("📋 **Terminal Commands to Run locally:**")
+                    st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
                 
                 if st.sidebar.button("🔄 Re-check Connection"):
                     st.rerun()
                     
-            elif ollama_info["status"] == "missing_models":
-                # Scenario B: Ollama is awake, but one or both models are missing
+            elif ollama_info["status"] == "warning":
+                # Matches the Missing Models Warning
                 st.sidebar.warning("⚠️ **Missing Required Models**")
-                st.sidebar.write("Ollama is running, but you are missing the models needed for this app:")
+                st.sidebar.write(ollama_info["message"])
                 
-                # Dynamically generate terminal strings depending on exactly what is missing
-                st.sidebar.info("📋 Open your terminal and copy-paste these commands:")
-                for missing in ollama_info["missing"]:
-                    st.sidebar.code(f"ollama pull {missing}", language="bash")
-                
-                st.sidebar.caption("The app will automatically unlock once the downloads reach 100% in your terminal.")
                 if st.sidebar.button("🔄 Check Download Progress"):
                     st.rerun()
                     
-            else:
-                # Scenario C: Status is "ready"! Unlock full features seamlessly.
-                st.sidebar.success("✅ **AI Copilot Connected & Ready**")
+            elif ollama_info["status"] == "ok":
+                # Status is "ok"! Unlock full features seamlessly.
+                st.sidebar.success(ollama_info["message"])
                 
                 # 2. Display Chat History in Sidebar
                 chat_container = st.sidebar.container(height=350)
@@ -1740,7 +1726,7 @@ if las_file_source is not None:
                     for message in st.session_state['ai_chat_history']:
                         if message["role"] == "user":
                             st.markdown(f"**🧑‍💻 You:** {message['content']}")
-                            if "images" in message:
+                            if "images" in message and message["images"]:
                                 st.markdown(f"*(📎 {len(message['images'])} Image(s) Attached)*")
                         else:
                             st.markdown(f"**🤖 AI:** {message['content']}")
@@ -1753,7 +1739,7 @@ if las_file_source is not None:
                 user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
                 
                 if user_query:
-                    if uploaded_imgs:  
+                    if uploaded_imgs and len(uploaded_imgs) > 0:  
                         combined_ai_response = ""
                         total_images = len(uploaded_imgs)
                         
