@@ -39,28 +39,36 @@ def query_local_llama(chat_history, system_context, model_name="llama3.1"):
     except Exception as e:
         return f"Local Engine Offline. Please check your terminal. Error: {e}"
 
-# --- 🤖 SYSTEM HEALTH CHECK ---
 def check_ollama_status():
-    """Verifies if the local Ollama engine is running and has the required models."""
+    """Safely checks if Ollama is running locally and inspects installed models."""
+    url = "http://localhost:11434/api/tags"
+    required_models = ["llama3.1", "moondream"]
+    missing_models = ["llama3.1", "moondream"]
+    
     try:
-        # Fast timeout to quickly detect if we are on a cloud server with no localhost
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        # Quick 1-second timeout so it never freezes the UI if Ollama is completely shut down
+        response = requests.get(url, timeout=1.0)
         if response.status_code == 200:
-            # Standardise model names to avoid exact matching issues
-            models = [model['name'] for model in response.json().get('models', [])]
-            # Simple check for base model names
-            has_llama = any("llama3.1" in m for m in models)
-            has_moondream = any("moondream" in m for m in models)
+            installed_data = response.json().get("models", [])
+            # Collect all names downcased (handles tags like 'llama3.1:latest')
+            installed_names = [m.get("name", "").lower() for m in installed_data]
             
-            if has_llama and has_moondream:
-                 return {"status": "ok", "message": "✅ Core AI active."}
+            # Scan inventory for our models
+            for name in installed_names:
+                if "llama3.1" in name and "llama3.1" in missing_models:
+                    missing_models.remove("llama3.1")
+                if "moondream" in name and "moondream" in missing_models:
+                    missing_models.remove("moondream")
+            
+            if not missing_models:
+                return {"status": "ready", "missing": []}
             else:
-                 return {"status": "warning", "message": "⚠️ Missing models. Please run `ollama pull llama3.1` and `ollama pull moondream` locally."}
-        return {"status": "error", "message": "⚠️ Ollama Connection Error."}
-        
-    except requests.exceptions.ConnectionError:
-        # If localhost refuses the connection, we are likely on the Streamlit Cloud server
-        return {"status": "error", "message": "☁️ **Cloud Version:** The AI Copilot is disabled on the web link because it requires local processing power. However, the main Dashboard and Data Analytics are fully functional!"}
+                return {"status": "missing_models", "missing": missing_models}
+        else:
+            return {"status": "offline", "missing": required_models}
+    except Exception:
+        # If connection fails completely, the engine server is offline
+        return {"status": "offline", "missing": required_models}
 
 # Initialize Chat Memory
 if 'ai_chat_history' not in st.session_state:
@@ -233,6 +241,7 @@ def route_calculated_curve(curve_name, destinations):
 # 2. Sidebar Layout & Data Loading
 st.sidebar.header("📁 Data Loading")
 # --- 📂 DUAL FILE UPLOADER ENGINE ---
+
 
 # 1. Custom File Upload
 uploaded_file = st.sidebar.file_uploader("Upload Your LAS File", type=['las'])
@@ -1696,29 +1705,43 @@ if las_file_source is not None:
             # Run our live background verification check
             ollama_info = check_ollama_status()
             
-            if ollama_info["status"] == "error":
-                # Matches the Cloud Warning or Offline Error
-                st.sidebar.error("❌ **AI Engine Offline**")
-                st.sidebar.markdown(ollama_info["message"])
-                
-                if "Cloud Version" not in ollama_info["message"]:
-                    st.sidebar.info("📋 **Terminal Commands to Run locally:**")
-                    st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
+            if ollama_info["status"] == "offline":
+                # Scenario A: Ollama server is completely shut down or not installed
+                st.sidebar.error("❌ **Ollama Engine Offline**")
+                st.sidebar.markdown(
+                    """
+                    The AI Copilot requires the Ollama engine running on your computer.
+                    
+                    **How to fix:**
+                    1. Download & install **Ollama** from [ollama.com](https://ollama.com/)
+                    2. Launch the Ollama desktop application.
+                    3. Open your terminal and download the required models using the instructions below.
+                    """
+                )
+                # Show explicit download commands anyway so they can prep
+                st.sidebar.info("📋 **Terminal Commands to Run:**")
+                st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
                 
                 if st.sidebar.button("🔄 Re-check Connection"):
                     st.rerun()
                     
-            elif ollama_info["status"] == "warning":
-                # Matches the Missing Models Warning
+            elif ollama_info["status"] == "missing_models":
+                # Scenario B: Ollama is awake, but one or both models are missing
                 st.sidebar.warning("⚠️ **Missing Required Models**")
-                st.sidebar.write(ollama_info["message"])
+                st.sidebar.write("Ollama is running, but you are missing the models needed for this app:")
                 
+                # Dynamically generate terminal strings depending on exactly what is missing
+                st.sidebar.info("📋 Open your terminal and copy-paste these commands:")
+                for missing in ollama_info["missing"]:
+                    st.sidebar.code(f"ollama pull {missing}", language="bash")
+                
+                st.sidebar.caption("The app will automatically unlock once the downloads reach 100% in your terminal.")
                 if st.sidebar.button("🔄 Check Download Progress"):
                     st.rerun()
                     
-            elif ollama_info["status"] == "ok":
-                # Status is "ok"! Unlock full features seamlessly.
-                st.sidebar.success(ollama_info["message"])
+            else:
+                # Scenario C: Status is "ready"! Unlock full features seamlessly.
+                st.sidebar.success("✅ **AI Copilot Connected & Ready**")
                 
                 # 2. Display Chat History in Sidebar
                 chat_container = st.sidebar.container(height=350)
@@ -1726,7 +1749,7 @@ if las_file_source is not None:
                     for message in st.session_state['ai_chat_history']:
                         if message["role"] == "user":
                             st.markdown(f"**🧑‍💻 You:** {message['content']}")
-                            if "images" in message and message["images"]:
+                            if "images" in message:
                                 st.markdown(f"*(📎 {len(message['images'])} Image(s) Attached)*")
                         else:
                             st.markdown(f"**🤖 AI:** {message['content']}")
@@ -1739,7 +1762,7 @@ if las_file_source is not None:
                 user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
                 
                 if user_query:
-                    if uploaded_imgs and len(uploaded_imgs) > 0:  
+                    if uploaded_imgs:  
                         combined_ai_response = ""
                         total_images = len(uploaded_imgs)
                         
