@@ -39,36 +39,28 @@ def query_local_llama(chat_history, system_context, model_name="llama3.1"):
     except Exception as e:
         return f"Local Engine Offline. Please check your terminal. Error: {e}"
 
+# --- 🤖 SYSTEM HEALTH CHECK ---
 def check_ollama_status():
-    """Safely checks if Ollama is running locally and inspects installed models."""
-    url = "http://localhost:11434/api/tags"
-    required_models = ["llama3.1", "moondream"]
-    missing_models = ["llama3.1", "moondream"]
-    
+    """Verifies if the local Ollama engine is running and has the required models."""
     try:
-        # Quick 1-second timeout so it never freezes the UI if Ollama is completely shut down
-        response = requests.get(url, timeout=1.0)
+        # Fast timeout to quickly detect if we are on a cloud server with no localhost
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
         if response.status_code == 200:
-            installed_data = response.json().get("models", [])
-            # Collect all names downcased (handles tags like 'llama3.1:latest')
-            installed_names = [m.get("name", "").lower() for m in installed_data]
+            # Standardise model names to avoid exact matching issues
+            models = [model['name'] for model in response.json().get('models', [])]
+            # Simple check for base model names
+            has_llama = any("llama3.1" in m for m in models)
+            has_moondream = any("moondream" in m for m in models)
             
-            # Scan inventory for our models
-            for name in installed_names:
-                if "llama3.1" in name and "llama3.1" in missing_models:
-                    missing_models.remove("llama3.1")
-                if "moondream" in name and "moondream" in missing_models:
-                    missing_models.remove("moondream")
-            
-            if not missing_models:
-                return {"status": "ready", "missing": []}
+            if has_llama and has_moondream:
+                 return {"status": "ok", "message": "✅ Core AI active."}
             else:
-                return {"status": "missing_models", "missing": missing_models}
-        else:
-            return {"status": "offline", "missing": required_models}
-    except Exception:
-        # If connection fails completely, the engine server is offline
-        return {"status": "offline", "missing": required_models}
+                 return {"status": "warning", "message": "⚠️ Missing models. Please run `ollama pull llama3.1` and `ollama pull moondream` locally."}
+        return {"status": "error", "message": "⚠️ Ollama Connection Error."}
+        
+    except requests.exceptions.ConnectionError:
+        # If localhost refuses the connection, we are likely on the Streamlit Cloud server
+        return {"status": "error", "message": "☁️ **Cloud Version:** The AI Copilot is disabled on the web link because it requires local processing power. However, the main Dashboard and Data Analytics are fully functional!"}
 
 # Initialize Chat Memory
 if 'ai_chat_history' not in st.session_state:
