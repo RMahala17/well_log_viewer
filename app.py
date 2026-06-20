@@ -14,34 +14,59 @@ import uuid
 from sklearn.ensemble import RandomForestRegressor
 
 import requests
-import json
 
 # ============================================================
-# 🤖  LOCAL AI ENGINE  —  Pure Python, zero JS tricks
+# 🤖  LOCAL AI ENGINE  —  Cloud-aware, Pure Python
 # ============================================================
-# IMPORTANT ARCHITECTURE NOTE:
-# Ollama runs on the user's own PC at localhost:11434.
-# When the app runs locally (streamlit run app.py) the Python
-# process IS on the user's PC, so requests.get("localhost:11434")
-# reaches Ollama directly — 100% reliable.
-# When the app is opened via the Streamlit Cloud link the Python
-# process runs on Streamlit's server, which cannot reach the
-# user's PC — but that is fine because we detect that case and
-# show a "run locally" instruction instead.
-# We never rely on JS→Python messaging (components.html always
-# returns None, so that approach can never work).
+# HOW IT WORKS:
+#
+# LOCAL  (streamlit run app.py  →  localhost:8501)
+#   Python runs ON YOUR PC, so requests to localhost:11434
+#   hit YOUR Ollama directly. ✅ Works perfectly.
+#
+# CLOUD  (*.streamlit.app link)
+#   Python runs on Streamlit's US servers. localhost:11434
+#   is THEIR localhost — Ollama is not there. It will ALWAYS
+#   fail, no matter what. This is not a bug; it is how cloud
+#   hosting works.
+#
+# SOLUTION:
+#   Detect the environment first. If on cloud, skip the
+#   network check and show a "run locally" message instead.
+#   If local, check Ollama normally.
 # ============================================================
+
+import os
 
 OLLAMA_BASE = "http://localhost:11434"
 REQUIRED_MODELS = ["llama3.1", "moondream"]
 
 
-def check_ollama_status():
+def is_streamlit_cloud() -> bool:
     """
-    Pure-Python check: hits localhost:11434 directly.
-    Works perfectly when the user runs the app locally.
-    Returns dict: {status: 'ready'|'missing_models'|'offline', missing: [...]}
+    Returns True when the app is running on Streamlit Community Cloud.
+    Streamlit Cloud always runs as the Linux user 'appuser' inside
+    a container where HOME=/home/appuser.  Local machines will have
+    a different HOME (e.g. C:\\Users\\Rohit on Windows or /home/rohit
+    on Linux), so this is a reliable, zero-config detection.
     """
+    home = os.environ.get("HOME", "")
+    return home == "/home/appuser" or os.path.exists("/home/appuser")
+
+
+def check_ollama_status() -> dict:
+    """
+    Returns one of four statuses:
+      'cloud'          – app is on Streamlit Cloud; Ollama can never be reached
+      'ready'          – Ollama running, all required models present
+      'missing_models' – Ollama running, but some models not yet downloaded
+      'offline'        – Ollama not running / not installed on this machine
+    """
+    # ── Cloud guard ──────────────────────────────────────────
+    if is_streamlit_cloud():
+        return {"status": "cloud", "missing": REQUIRED_MODELS}
+
+    # ── Local check ──────────────────────────────────────────
     try:
         resp = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=3)
         if resp.status_code != 200:
@@ -52,9 +77,7 @@ def check_ollama_status():
             req for req in REQUIRED_MODELS
             if not any(req.lower() in name for name in installed)
         ]
-        if not missing:
-            return {"status": "ready", "missing": []}
-        return {"status": "missing_models", "missing": missing}
+        return {"status": "ready" if not missing else "missing_models", "missing": missing}
 
     except Exception:
         return {"status": "offline", "missing": REQUIRED_MODELS}
@@ -1711,11 +1734,42 @@ if las_file_source is not None:
         """
 
         if copilot_enabled:
-            # Pure Python Ollama check — works when running: streamlit run app.py
-            # Python and Ollama are both on the same machine, so localhost:11434 is reachable.
+            # Check environment first, then Ollama status
             ollama_info = check_ollama_status()
 
-            if ollama_info["status"] == "offline":
+            # ── ☁️ CLOUD DEPLOYMENT — feature needs local run ──────────────
+            if ollama_info["status"] == "cloud":
+                st.sidebar.warning("☁️ **Cloud Link Detected**")
+                st.sidebar.markdown(
+                    """
+**The AI Copilot cannot run via the Streamlit Cloud link.**
+
+When you open the app from `streamlit.app`, Python runs on Streamlit's servers
+in a data center — not on your computer. So `localhost:11434` points to
+*their* machine (which has no Ollama), not yours.
+
+**This is not a bug.** It is how cloud hosting works.
+
+---
+
+**✅ To use the AI Copilot, run the app locally:**
+
+1. Open **VS Code** (or any terminal)
+2. Navigate to your project folder
+3. Run this command:
+```
+streamlit run app.py
+```
+4. Open **http://localhost:8501** in your browser
+5. Toggle the AI Copilot on — it will connect to your local Ollama instantly.
+
+*The cloud link is great for sharing the petrophysics tools.
+The AI Copilot is a local-only bonus feature.*
+                    """
+                )
+
+            # ── ❌ OLLAMA NOT RUNNING (local machine, but Ollama is off) ──
+            elif ollama_info["status"] == "offline":
                 st.sidebar.error("❌ **Ollama Not Running**")
                 st.sidebar.markdown(
                     """
@@ -1739,6 +1793,7 @@ Then click **Re-check** below 👇
                 if st.sidebar.button("🔄 Re-check Ollama", type="primary"):
                     st.rerun()
 
+            # ── ⚠️ OLLAMA RUNNING BUT MODELS MISSING ──────────────────────
             elif ollama_info["status"] == "missing_models":
                 missing_list = ollama_info["missing"]
                 st.sidebar.warning(f"⚠️ **Ollama running — {len(missing_list)} model(s) missing**")
@@ -1749,8 +1804,8 @@ Then click **Re-check** below 👇
                 if st.sidebar.button("🔄 Re-check Models", type="primary"):
                     st.rerun()
 
+            # ── ✅ FULLY READY ─────────────────────────────────────────────
             else:
-                # ✅ READY — show the full AI chat UI
                 st.sidebar.success("✅ **AI Copilot Ready**")
 
                 chat_container = st.sidebar.container(height=350)
