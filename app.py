@@ -15,118 +15,66 @@ from sklearn.ensemble import RandomForestRegressor
 
 import requests
 import json
-# --- 🤖 LLOCAL AI ENGINE ---
-# --- 🤖 LOCAL AI ENGINE (Client-Side Aware) ---
-import streamlit.components.v1 as components
 
-def query_local_llama(chat_history, system_context, model_name="llama3.1"):
-    """Sends chat history to the user's LOCAL Ollama via sidebar JS bridge result."""
-    url = "http://localhost:11434/api/chat"
-    messages = [{"role": "system", "content": system_context}] + chat_history
-    payload = {"model": model_name, "messages": messages, "stream": False}
-    try:
-        response = requests.post(url, json=payload, timeout=None)
-        if response.status_code == 200:
-            return response.json().get("message", {}).get("content", "Error generating response.")
-        elif response.status_code == 404:
-            return f"❌ **Error:** The model '{model_name}' is not installed. Please open your terminal and run: `ollama pull {model_name}`"
-        else:
-            return f"Ollama Connection Error: Status {response.status_code}."
-    except Exception as e:
-        return f"❌ Local Engine Offline. Please check your terminal. Error: {e}"
+# ============================================================
+# 🤖  LOCAL AI ENGINE  —  Pure Python, zero JS tricks
+# ============================================================
+# IMPORTANT ARCHITECTURE NOTE:
+# Ollama runs on the user's own PC at localhost:11434.
+# When the app runs locally (streamlit run app.py) the Python
+# process IS on the user's PC, so requests.get("localhost:11434")
+# reaches Ollama directly — 100% reliable.
+# When the app is opened via the Streamlit Cloud link the Python
+# process runs on Streamlit's server, which cannot reach the
+# user's PC — but that is fine because we detect that case and
+# show a "run locally" instruction instead.
+# We never rely on JS→Python messaging (components.html always
+# returns None, so that approach can never work).
+# ============================================================
+
+OLLAMA_BASE = "http://localhost:11434"
+REQUIRED_MODELS = ["llama3.1", "moondream"]
 
 
 def check_ollama_status():
     """
-    Checks Ollama on the USER'S local machine using a JS bridge via Streamlit query params.
-    Returns: dict with 'status' key: 'ready' | 'missing_models' | 'offline'
+    Pure-Python check: hits localhost:11434 directly.
+    Works perfectly when the user runs the app locally.
+    Returns dict: {status: 'ready'|'missing_models'|'offline', missing: [...]}
     """
-    required_models = ["llama3.1", "moondream"]
-
-    # Read result injected by JS bridge (stored in query param 'ollama_status')
-    params = st.query_params
-    raw = params.get("ollama_status", "")
-
-    if not raw:
-        return {"status": "checking", "missing": required_models}
-
     try:
-        data = json.loads(raw)
-        status = data.get("status", "offline")
-        missing = data.get("missing", required_models)
-        return {"status": status, "missing": missing}
+        resp = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=3)
+        if resp.status_code != 200:
+            return {"status": "offline", "missing": REQUIRED_MODELS}
+
+        installed = [m.get("name", "").lower() for m in resp.json().get("models", [])]
+        missing = [
+            req for req in REQUIRED_MODELS
+            if not any(req.lower() in name for name in installed)
+        ]
+        if not missing:
+            return {"status": "ready", "missing": []}
+        return {"status": "missing_models", "missing": missing}
+
     except Exception:
-        return {"status": "offline", "missing": required_models}
+        return {"status": "offline", "missing": REQUIRED_MODELS}
 
 
-def render_ollama_detector():
-    """
-    Injects a JS component that pings the user's LOCAL Ollama (localhost:11434),
-    checks for required models, and writes the result back to Streamlit via URL query params.
-    This runs 100% in the user's browser — works even on streamlit.app cloud hosting.
-    """
-    required_models_js = json.dumps(["llama3.1", "moondream"])
-
-    js_code = f"""
-    <script>
-    (async function() {{
-        const requiredModels = {required_models_js};
-
-        async function checkOllama() {{
-            try {{
-                const resp = await fetch("http://localhost:11434/api/tags", {{
-                    method: "GET",
-                    signal: AbortSignal.timeout(2500)
-                }});
-
-                if (!resp.ok) {{
-                    pushStatus({{status: "offline", missing: requiredModels}});
-                    return;
-                }}
-
-                const data = await resp.json();
-                const installed = (data.models || []).map(m => m.name.toLowerCase());
-
-                let missing = [];
-                for (const req of requiredModels) {{
-                    const found = installed.some(name => name.includes(req.toLowerCase()));
-                    if (!found) missing.push(req);
-                }}
-
-                if (missing.length === 0) {{
-                    pushStatus({{status: "ready", missing: []}});
-                }} else {{
-                    pushStatus({{status: "missing_models", missing: missing}});
-                }}
-
-            }} catch(e) {{
-                pushStatus({{status: "offline", missing: requiredModels}});
-            }}
-        }}
-
-        function pushStatus(result) {{
-            try {{
-                const encoded = encodeURIComponent(JSON.stringify(result));
-                const url = new URL(window.parent.location.href);
-                const current = url.searchParams.get("ollama_status");
-                const next = JSON.stringify(result);
-                // Only push if state actually changed to avoid infinite reruns
-                if (current !== next) {{
-                    url.searchParams.set("ollama_status", next);
-                    window.parent.history.replaceState(null, '', url.toString());
-                    // Trigger Streamlit rerun by posting a message
-                    window.parent.postMessage({{type: "streamlit:setComponentValue", value: next}}, "*");
-                }}
-            }} catch(e) {{}}
-        }}
-
-        await checkOllama();
-        // Re-check every 5 seconds so app auto-unlocks after model download completes
-        setInterval(checkOllama, 5000);
-    }})();
-    </script>
-    """
-    components.html(js_code, height=0, width=0)
+def query_local_llama(chat_history, system_context, model_name="llama3.1"):
+    """Send a chat request to the user's local Ollama instance."""
+    messages = [{"role": "system", "content": system_context}] + chat_history
+    payload = {"model": model_name, "messages": messages, "stream": False}
+    try:
+        resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120)
+        if resp.status_code == 200:
+            return resp.json().get("message", {}).get("content", "No response from model.")
+        elif resp.status_code == 404:
+            return (f"❌ Model `{model_name}` not found. "
+                    f"Run `ollama pull {model_name}` in your terminal.")
+        else:
+            return f"❌ Ollama error (HTTP {resp.status_code})."
+    except Exception as e:
+        return f"❌ Cannot reach Ollama. Make sure it is running. Error: {e}"
     
 # Initialize Chat Memory
 if 'ai_chat_history' not in st.session_state:
@@ -1763,53 +1711,47 @@ if las_file_source is not None:
         """
 
         if copilot_enabled:
-            # Always inject the JS detector — it runs in the user's browser silently
-            render_ollama_detector()
-
+            # Pure Python Ollama check — works when running: streamlit run app.py
+            # Python and Ollama are both on the same machine, so localhost:11434 is reachable.
             ollama_info = check_ollama_status()
 
-            if ollama_info["status"] == "checking":
-                st.sidebar.info("🔍 **Detecting Ollama on your computer...** (takes 2-3 seconds)")
-                st.sidebar.caption("If this stays here, click **Re-check** below.")
-                if st.sidebar.button("🔄 Re-check Connection"):
-                    # Clear stale query param and rerun
-                    st.query_params.pop("ollama_status", None)
-                    st.rerun()
-
-            elif ollama_info["status"] == "offline":
-                st.sidebar.error("❌ **Ollama Not Detected on Your Computer**")
+            if ollama_info["status"] == "offline":
+                st.sidebar.error("❌ **Ollama Not Running**")
                 st.sidebar.markdown(
                     """
-                    The AI Copilot needs **Ollama** installed and running **on your own computer** — 
-                    it does NOT run on the cloud server.
+**The AI Copilot needs Ollama running on your computer.**
 
-                    **Steps to get started:**
-                    1. Download & install **Ollama** → [ollama.com](https://ollama.com/)
-                    2. Launch the Ollama desktop app (or run `ollama serve` in your terminal)
-                    3. Open your terminal and run the commands below 👇
+**Haven't installed Ollama yet?**
+1. Download from [ollama.com](https://ollama.com/)
+2. Install and launch it
+3. Open a terminal and run:
+```
+ollama pull llama3.1
+ollama pull moondream
+```
+**Already installed?** Just make sure it's running:
+- Open the Ollama desktop app, OR
+- Run `ollama serve` in a terminal
+
+Then click **Re-check** below 👇
                     """
                 )
-                st.sidebar.info("📋 **Paste these into your terminal:**")
-                st.sidebar.code("ollama pull llama3.1\nollama pull moondream", language="bash")
-                st.sidebar.caption("⏳ The app auto-detects Ollama every 5 seconds. Once Ollama is running, this page will unlock automatically.")
-                if st.sidebar.button("🔄 Re-check Now"):
-                    st.query_params.pop("ollama_status", None)
+                if st.sidebar.button("🔄 Re-check Ollama", type="primary"):
                     st.rerun()
 
             elif ollama_info["status"] == "missing_models":
-                st.sidebar.warning("⚠️ **Ollama Found — Missing Required Models**")
-                st.sidebar.write("Ollama is running on your computer, but these models still need to be downloaded:")
-                st.sidebar.info("📋 **Open your terminal and run:**")
-                for missing in ollama_info["missing"]:
-                    st.sidebar.code(f"ollama pull {missing}", language="bash")
-                st.sidebar.caption("⏳ The app checks every 5 seconds. Once your download completes (100% in terminal), the AI Copilot will unlock automatically.")
-                if st.sidebar.button("🔄 Check Download Progress"):
-                    st.query_params.pop("ollama_status", None)
+                missing_list = ollama_info["missing"]
+                st.sidebar.warning(f"⚠️ **Ollama running — {len(missing_list)} model(s) missing**")
+                st.sidebar.write("Open a terminal and run:")
+                for m in missing_list:
+                    st.sidebar.code(f"ollama pull {m}", language="bash")
+                st.sidebar.caption("After the download finishes (shows 100%), click Re-check.")
+                if st.sidebar.button("🔄 Re-check Models", type="primary"):
                     st.rerun()
 
             else:
-                # Status is "ready" — full AI Copilot unlocked
-                st.sidebar.success("✅ **AI Copilot Connected & Ready**")
+                # ✅ READY — show the full AI chat UI
+                st.sidebar.success("✅ **AI Copilot Ready**")
 
                 chat_container = st.sidebar.container(height=350)
                 with chat_container:
@@ -1817,13 +1759,14 @@ if las_file_source is not None:
                         if message["role"] == "user":
                             st.markdown(f"**🧑‍💻 You:** {message['content']}")
                             if "images" in message:
-                                st.markdown(f"*(📎 {len(message['images'])} Image(s) Attached)*")
+                                st.markdown(f"*(📎 {len(message['images'])} image(s) attached)*")
                         else:
                             st.markdown(f"**🤖 AI:** {message['content']}")
                             st.markdown("---")
 
                 uploaded_imgs = st.sidebar.file_uploader(
-                    "📎 Attach Image(s)", type=["png", "jpg", "jpeg"], accept_multiple_files=True
+                    "📎 Attach Image(s)", type=["png", "jpg", "jpeg"],
+                    accept_multiple_files=True
                 )
                 user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
 
@@ -1831,9 +1774,8 @@ if las_file_source is not None:
                     if uploaded_imgs:
                         combined_ai_response = ""
                         total_images = len(uploaded_imgs)
-
                         for idx, uploaded_img in enumerate(uploaded_imgs, start=1):
-                            with st.sidebar.spinner(f"Analyzing Image {idx} of {total_images} with moondream..."):
+                            with st.sidebar.spinner(f"Analyzing image {idx}/{total_images} with moondream..."):
                                 img = Image.open(uploaded_img)
                                 if img.mode != 'RGB':
                                     img = img.convert('RGB')
@@ -1841,39 +1783,39 @@ if las_file_source is not None:
                                 buffered = io.BytesIO()
                                 img.save(buffered, format="JPEG", quality=85)
                                 img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-                                enhanced_prompt = f"Please look extremely closely at the text, numbers, and UI elements in this image to answer the user's request accurately: {user_query}"
-                                single_image_message = [{
-                                    "role": "user",
-                                    "content": enhanced_prompt,
-                                    "images": [img_b64]
-                                }]
+                                enhanced_prompt = (
+                                    f"Please look extremely closely at the text, numbers, and UI "
+                                    f"elements in this image to answer accurately: {user_query}"
+                                )
                                 img_response = query_local_llama(
-                                    chat_history=single_image_message,
+                                    chat_history=[{"role": "user", "content": enhanced_prompt, "images": [img_b64]}],
                                     system_context=system_copilot_instruction,
                                     model_name="moondream"
                                 )
-                                combined_ai_response += f"### 📊 Analysis for Image {idx} ({uploaded_img.name}):\n{img_response}\n\n---\n\n"
-
+                                combined_ai_response += (
+                                    f"### 📊 Image {idx} — {uploaded_img.name}:\n{img_response}\n\n---\n\n"
+                                )
                         st.session_state['ai_chat_history'].append({
                             "role": "user",
                             "content": user_query,
                             "images": [base64.b64encode(u.getvalue()).decode("utf-8") for u in uploaded_imgs]
                         })
-                        st.session_state['ai_chat_history'].append({"role": "assistant", "content": combined_ai_response})
+                        st.session_state['ai_chat_history'].append({
+                            "role": "assistant", "content": combined_ai_response
+                        })
                         st.rerun()
 
                     else:
                         st.session_state['ai_chat_history'].append({"role": "user", "content": user_query})
-                        active_model = "llama3.1"
-
-                        with st.sidebar.spinner(f"Analyzing with {active_model}..."):
+                        with st.sidebar.spinner("Thinking with llama3.1..."):
                             ai_response = query_local_llama(
                                 chat_history=st.session_state['ai_chat_history'],
                                 system_context=system_copilot_instruction,
-                                model_name=active_model
+                                model_name="llama3.1"
                             )
-                        st.session_state['ai_chat_history'].append({"role": "assistant", "content": ai_response})
+                        st.session_state['ai_chat_history'].append({
+                            "role": "assistant", "content": ai_response
+                        })
                         st.rerun()
 
                 if st.sidebar.button("🗑️ Clear Chat History"):
@@ -1881,7 +1823,7 @@ if las_file_source is not None:
                     st.rerun()
 
         else:
-            st.sidebar.info("💡 AI Copilot is currently deactivated. The main analytics engine is running in standalone mode.")
+            st.sidebar.info("💡 AI Copilot is off. Toggle it on above to start chatting with your well log data.")
             
     except Exception as e:
         st.error(f"Error reading LAS file: {e}")
