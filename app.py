@@ -577,7 +577,7 @@ if las_file_source is not None:
                         
                         rec_defaults = {
                             "col": def_col, "log": def_log, "xmin": c_min, "xmax": c_max,
-                            "depth": (depth_range[0], depth_range[1]), "xspc": def_xspc, "yspc": 50.0
+                            "depth": (depth_range[0], depth_range[1]), "xspc": def_xspc, "yspc": 200.0
                         }
                         
                         with st.expander(f"⚙️ {curve} Settings"):
@@ -593,7 +593,7 @@ if las_file_source is not None:
                             
                             s_c1, s_c2 = st.columns(2)
                             x_spacing = s_c1.number_input("X Spacing", value=def_xspc, key=f"rec_xspc_{curve}_{i}")
-                            y_spacing = s_c2.number_input("Y Spacing", value=50.0, key=f"rec_yspc_{curve}_{i}")
+                            y_spacing = s_c2.number_input("Y Spacing", value=200.0, key=f"rec_yspc_{curve}_{i}")
 
                             st.button("🔄 Reset Defaults", key=f"rec_reset_{curve}_{i}", on_click=reset_curve_settings, args=("rec", curve, i, rec_defaults))
 
@@ -637,7 +637,7 @@ if las_file_source is not None:
                         def_log = True if "R" in curve.upper() or "AFEC" in curve.upper() else False
                         def_xspc = float(max(0.1, round((c_max-c_min)/5, 1)))
                         
-                        sm_defaults = {"win": 10, "col": def_col, "log": def_log, "xmin": c_min, "xmax": c_max, "depth": (depth_range[0], depth_range[1]), "xspc": def_xspc, "yspc": 50.0, "orig": True}
+                        sm_defaults = {"win": 10, "col": def_col, "log": def_log, "xmin": c_min, "xmax": c_max, "depth": (depth_range[0], depth_range[1]), "xspc": def_xspc, "yspc": 200.0, "orig": True}
                         
                         with st.expander(f"⚙️ {curve} Smoothing Settings"):
                             window_size = st.number_input(f" Window Size", min_value=1, max_value=500, value=10, step=1, key=f"sm_win_{curve}_{i}")
@@ -653,7 +653,7 @@ if las_file_source is not None:
                             
                             s_c1, s_c2 = st.columns(2)
                             x_spacing = s_c1.number_input("X Spacing", value=def_xspc, key=f"sm_xspc_{curve}_{i}")
-                            y_spacing = s_c2.number_input("Y Spacing", value=50.0, key=f"sm_yspc_{curve}_{i}")
+                            y_spacing = s_c2.number_input("Y Spacing", value=200.0, key=f"sm_yspc_{curve}_{i}")
                             
                             show_original = st.checkbox(f"Show Original Raw Curve", value=True, key=f"sm_orig_{curve}_{i}")
                             st.button("🔄 Reset Defaults", key=f"sm_reset_{curve}_{i}", on_click=reset_curve_settings, args=("sm", curve, i, sm_defaults))
@@ -775,7 +775,7 @@ if las_file_source is not None:
             st.markdown("#### 📐 Global Depth Range (Y-Axis)")
             g_col1, g_col2 = st.columns([3, 1])
             with g_col1: mt_global_depth = st.slider("Isolate Depth", min_value=depth_range[0], max_value=depth_range[1], value=(depth_range[0], depth_range[1]), key="mt_global_depth")
-            with g_col2: mt_global_yspc = st.number_input("Global Y Spacing", value=50.0, key="mt_global_yspc")
+            with g_col2: mt_global_yspc = st.number_input("Global Y Spacing", value=200.0, key="mt_global_yspc")
 
             st.button("➕ Add New Track", on_click=add_track, type="primary")
             st.divider()
@@ -946,7 +946,7 @@ if las_file_source is not None:
             with vsh_c2: gr_clean = st.number_input("GR Clean (Sand):", value=20.0, step=1.0)
             with vsh_c3: gr_shale = st.number_input("GR Shale (Shale):", value=100.0, step=1.0)
 
-            vsh_defaults = {"col": "#A52A2A", "log": False, "xmin": 0.0, "xmax": 1.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 50.0}
+            vsh_defaults = {"col": "#A52A2A", "log": False, "xmin": 0.0, "xmax": 1.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 200.0}
             with st.expander("⚙️ Vsh Plot Settings"):
                 set1, set2 = st.columns(2)
                 vsh_color = set1.color_picker("Color", vsh_defaults["col"], key="eval_col_VSH")
@@ -1001,7 +1001,7 @@ if las_file_source is not None:
                 vshc_c1, vshc_c2 = st.columns(2)
                 with vshc_c1: vsh_input_curve = st.selectbox("Select Input Vsh (Linear):", vsh_candidates, key="eval_vshc_input")
                 with vshc_c2: correction_types = st.multiselect("Select Rock Age:", ["Tertiary (Younger Rocks)", "Older Rocks"], default=["Tertiary (Younger Rocks)"], key="eval_vshc_type")
-                vshc_defaults = {"col_tert": "#FF8C00", "col_older": "#800080", "log": False, "xmin": 0.0, "xmax": 1.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 50.0}
+                vshc_defaults = {"col_tert": "#FF8C00", "col_older": "#800080", "log": False, "xmin": 0.0, "xmax": 1.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 200.0}
                 with st.expander("⚙️ Vsh Correction Plot Settings"):
                     set_c1, set_c2, set_c3 = st.columns(3)
                     vshc_col_tert = set_c1.color_picker("Color (Tertiary)", vshc_defaults["col_tert"], key="eval_col_VSHC_tert")
@@ -1046,7 +1046,7 @@ if las_file_source is not None:
             with phi_c1: rho_curve = st.selectbox("Select Density Curve:", available_curves, index=rho_idx, key="eval_rho_sel")
             with phi_c2: rho_mat = st.number_input("Matrix Density:", value=2.65, step=0.01)
             with phi_c3: rho_fl = st.number_input("Fluid Density:", value=1.00, step=0.01)
-            phi_defaults = {"col": "#1E90FF", "log": False, "xmin": 0.5, "xmax": 0.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 50.0}
+            phi_defaults = {"col": "#1E90FF", "log": False, "xmin": 0.5, "xmax": 0.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 200.0}
             with st.expander("⚙️ Density Porosity Plot Settings"):
                 set1, set2 = st.columns(2)
                 phi_color = set1.color_picker("Color", phi_defaults["col"], key="eval_col_PHI")
@@ -1095,7 +1095,7 @@ if las_file_source is not None:
             with phis_c1: dt_curve = st.selectbox("Select Transit Time Curve (Δt):", available_curves, index=dt_idx, key="eval_dt_sel")
             with phis_c2: dt_mat = st.number_input("Matrix Transit Time (Δt_ma):", value=55.5, step=1.0)
             with phis_c3: dt_fl = st.number_input("Fluid Transit Time (Δt_fl):", value=189.0, step=1.0)
-            phis_defaults = {"col": "#32CD32", "log": False, "xmin": 0.5, "xmax": 0.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 50.0}
+            phis_defaults = {"col": "#32CD32", "log": False, "xmin": 0.5, "xmax": 0.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 200.0}
             with st.expander("⚙️ Sonic Porosity Plot Settings"):
                 set1, set2 = st.columns(2)
                 phis_color = set1.color_picker("Color", phis_defaults["col"], key="eval_col_PHIS")
@@ -1146,7 +1146,7 @@ if las_file_source is not None:
             with phit_c2: phid_curve = st.selectbox("Select Density Porosity (ΦD):", phi_curves if phi_curves else available_curves, key="eval_phid_input")
             with phit_c3: geological_case = st.radio("Geological Case:", ["Gas Bearing Formation", "Oil or Brine Bearing"], key="eval_phit_case")
 
-            phit_defaults = {"col": "#FF00FF", "log": False, "xmin": 0.5, "xmax": 0.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 50.0}
+            phit_defaults = {"col": "#FF00FF", "log": False, "xmin": 0.5, "xmax": 0.0, "depth": (depth_range[0], depth_range[1]), "xspc": 0.1, "yspc": 200.0}
             with st.expander("⚙️ Total Porosity Plot Settings"):
                 set1, set2 = st.columns(2)
                 phit_color = set1.color_picker("Line Color", phit_defaults["col"], key="eval_col_PHIT")
