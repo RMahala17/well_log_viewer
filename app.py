@@ -1951,7 +1951,7 @@ else:
     # Top Hero Banner Custom CSS layout (Adaptive Gray for Light & Dark Theme)
     st.markdown(
         """
-        <div style="background-color: rgba(128, 128, 128, 0.12); padding: 25px; border-radius: 15px; margin-bottom: 30px; border-left: 5px solid #ff4b4b; border-top: 1px solid rgba(128, 128, 128, 0.15); border-right: 1px solid rgba(128, 128, 128, 0.15); border-bottom: 1px solid rgba(128, 128, 128, 0.15);">
+        <div style="background-color: rgba(128, 128, 128, 0.12); padding: 25px; border-radius: 15px; margin-bottom: 30px; border-left: 1px solid rgba(128, 128, 128, 0.15); border-top: 1px solid rgba(128, 128, 128, 0.15); border-right: 1px solid rgba(128, 128, 128, 0.15); border-bottom: 1px solid rgba(128, 128, 128, 0.15);">
             <h1 style="margin: 0; font-size: 2.6rem; font-weight: bold; letter-spacing: 0.5px;"> AI Petrophysics</h1>
             <p style="font-size: 1.1rem; margin-top: 6px; margin-bottom: 0; opacity: 0.75; font-family: sans-serif;">
                 Advanced Subsurface Wireline Log Evaluation & Intelligent Interpretation Suite
