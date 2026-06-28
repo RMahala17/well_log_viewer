@@ -272,8 +272,37 @@ st.sidebar.header("📁 Data Loading")
 # --- 📂 DUAL FILE UPLOADER ENGINE ---
 
 
+import psutil # Ensure this is at the top of your file with other imports!
+
 # 1. Custom File Upload
 uploaded_file = st.sidebar.file_uploader("Upload Your LAS File", type=['las'])
+
+# --- NEW: DYNAMIC RAM CHECK LOGIC ---
+if uploaded_file is not None:
+    # 1. Get uploaded file size in GB
+    file_size_gb = uploaded_file.size / (1024**3)
+    
+    # 2. Get system's currently available RAM in GB
+    available_ram_gb = psutil.virtual_memory().available / (1024**3)
+    
+    # 3. AI Heuristic: Parsing dense well logs into Pandas/Numpy takes roughly 5x the file size in RAM
+    required_ram_gb = file_size_gb * 5.0
+    
+    if required_ram_gb > available_ram_gb:
+        st.sidebar.error("⚠️ **Hardware Limit Exceeded**")
+        st.sidebar.warning(
+            f"Your PC does not have enough available RAM to safely process this file.\n\n"
+            f"• **File Size:** {file_size_gb:.2f} GB\n"
+            f"• **Required RAM:** ~{required_ram_gb:.2f} GB\n"
+            f"• **Available RAM:** {available_ram_gb:.2f} GB"
+        )
+        st.sidebar.info("💡 Please upload a smaller file, or run this application on a machine with higher RAM (e.g., 32GB+).")
+        st.stop() # This instantly stops the app from proceeding, saving the PC from crashing!
+    else:
+        st.sidebar.success(
+            f"🖥️ **System Check Passed:** Enough RAM available! "
+            f"(Required: ~{required_ram_gb:.2f} GB | Available: {available_ram_gb:.2f} GB)"
+        )
 
 # Divider or spacing
 st.sidebar.markdown("<div style='text-align: center; margin: 5px 0; opacity: 0.5;'>— OR —</div>", unsafe_allow_html=True)
