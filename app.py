@@ -822,6 +822,21 @@ if las_file_source is not None:
                     x_max = b_c2.number_input("X Max", value=default_xmax, key=f"mt_xmax_{track_id}")
                     x_spacing = st.number_input("X Major Spacing", value=default_spc, key=f"mt_xspc_{track_id}", disabled=is_log)
 
+                    # --- UPDATED UNBOUNDED WINDOW SIZE FEATURE ---
+                    sm_col1, sm_col2 = st.columns(2)
+                    with sm_col1:
+                        smooth_window = st.number_input(
+                            f"Smoothening Window Size", 
+                            min_value=1, 
+                            value=1,  # Removed the max_value constraint entirely!
+                            step=2, 
+                            key=f"mt_smooth_{track_id}"
+                        )
+                    with sm_col2:
+                        st.write("") 
+                        st.write("")
+                        show_raw = st.checkbox(f"Show Original Raw Curve", value=False, key=f"mt_raw_{track_id}")
+
                     curve_colors = {}
                     if selected_curves:
                         st.markdown("**🎨 Curve Colors**")
@@ -830,7 +845,11 @@ if las_file_source is not None:
                             with color_cols[j]: curve_colors[curve] = st.color_picker(f"{curve}", value=mt_defaults[f"col_{curve}"], key=f"mt_col_{curve}_{track_id}")
 
                     st.button("🔄 Reset Track Defaults", key=f"mt_reset_{track_id}", on_click=reset_multi_track, args=(track_id, mt_defaults))
-                    track_settings.append({'curves': selected_curves, 'colors': curve_colors, 'is_log': is_log, 'x_min': x_min, 'x_max': x_max, 'x_spacing': x_spacing})
+                    track_settings.append({
+                        'curves': selected_curves, 'colors': curve_colors, 'is_log': is_log, 
+                        'x_min': x_min, 'x_max': x_max, 'x_spacing': x_spacing,
+                        'smooth_window': smooth_window, 'show_raw': show_raw
+                    })
 
             st.divider()
             num_tracks = len(st.session_state.multi_tracks)
@@ -886,7 +905,38 @@ if las_file_source is not None:
                     # --- STANDARD CURVE PLOTTING OVER THE BACKGROUNDS ---
                     for curve in settings['curves']:
                         dash_style = 'dash' if curve == 'NPHI' else 'solid'
-                        fig_mt.add_trace(go.Scatter(x=mt_df[curve], y=mt_df['DEPTH'], name=f"{curve}", line=dict(color=settings['colors'].get(curve, '#000'), width=1.8, dash=dash_style), mode='lines'), row=1, col=col_idx)
+                        curve_color = settings['colors'].get(curve, '#000')
+                        
+                        smooth_w = settings['smooth_window']
+                        show_raw_flag = settings['show_raw']
+                        
+                        # Apply smoothing if requested
+                        if smooth_w > 1:
+                            plot_data = mt_df[curve].rolling(window=smooth_w, center=True).mean()
+                            main_name = f"{curve} (Smoothed)"
+                        else:
+                            plot_data = mt_df[curve]
+                            main_name = curve
+                            
+                        # Plot primary curve
+                        fig_mt.add_trace(go.Scatter(
+                            x=plot_data, 
+                            y=mt_df['DEPTH'], 
+                            name=main_name, 
+                            line=dict(color=curve_color, width=1.8, dash=dash_style), 
+                            mode='lines'
+                        ), row=1, col=col_idx)
+                        
+                        # Plot raw overlay if requested
+                        if smooth_w > 1 and show_raw_flag:
+                            fig_mt.add_trace(go.Scatter(
+                                x=mt_df[curve], 
+                                y=mt_df['DEPTH'], 
+                                name=f"{curve} (Raw)", 
+                                opacity=0.4, 
+                                line=dict(color=curve_color, width=1, dash='dot'), 
+                                mode='lines'
+                            ), row=1, col=col_idx)
 
                     # Configure Axis Scales
                     if settings['is_log']:
