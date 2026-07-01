@@ -2,6 +2,8 @@ import base64
 from PIL import Image
 import io
 import os
+import html
+import hashlib
 from fpdf import FPDF
 import streamlit as st
 import lasio
@@ -12,8 +14,31 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import uuid
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
 
 import requests
+
+# psutil is optional — the RAM-check feature degrades gracefully without it
+# instead of crashing the whole app if it isn't installed.
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+# Absolute path to this script's folder. Used for any bundled asset (demo LAS
+# file, rig/gym images) so file lookups work no matter what directory
+# Streamlit was launched from.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# ==========================================
+# PHASE 2: GLOBAL REPOSITORY SETUP
+# ==========================================
+WELL_REPOSITORY_DIR = os.path.join(SCRIPT_DIR, "well_data_repository")
+MASTER_DATABASE_PATH = os.path.join(WELL_REPOSITORY_DIR, "master_subsurface_database.parquet")
+
+# Automatically generate the directory if it doesn't exist yet
+if not os.path.exists(WELL_REPOSITORY_DIR):
+    os.makedirs(WELL_REPOSITORY_DIR)
 
 # ============================================================
 # 🤖  LOCAL AI ENGINE  —  Cloud-aware, Pure Python
@@ -41,6 +66,96 @@ import os
 OLLAMA_BASE = "http://localhost:11434"
 REQUIRED_MODELS = ["llama3.1", "moondream"]
 
+def rebuild_master_subsurface_database():
+    """Loops through the external data folder, normalizes columns, and saves to an optimized Parquet file."""
+    all_well_data = []
+    skipped_files = [] # NEW: We will track exactly what fails
+    
+    DICTIONARY_MAP = {
+        'GR': ['GR', 'GRD', 'SGR', 'NGR', 'GAMMA'],
+        'RT': ['ILD', 'ILM', 'LLD', 'RT', 'AFEC', 'RILD', 'AHT90', 'RESD', 'RESISTIVITY'],
+        'RHOB': ['RHOB', 'DEN', 'ZDEN', 'RHOZ', 'DENS', 'DENSITY'],
+        'NPHI': ['NPHI', 'CNC', 'NEUT', 'NPHI_LS', 'PORO', 'NEUTRON'],
+        'CALI': ['CALI', 'CAL', 'CALIPER'],
+        'BS': ['BS', 'BIT', 'BITSIZE'],
+        'DT': ['DT', 'AC', 'SONIC', 'DTC']
+    }
+    
+    las_files = [f for f in os.listdir(WELL_REPOSITORY_DIR) if f.lower().endswith('.las')]
+    
+    if not las_files:
+        return None, skipped_files # NEW: Return a tuple
+
+    for file_name in las_files:
+        try:
+            file_path = os.path.join(WELL_REPOSITORY_DIR, file_name)
+            las = lasio.read(file_path)
+            df = las.df().reset_index() 
+            
+            # FIX 1: Combine header name AND file name so every single file counts as unique
+            header_name = las.well.WELL.value if 'WELL' in las.well else "UNKNOWN"
+            well_id = f"{header_name} [{file_name}]"
+            df['WELL_NAME'] = well_id
+            
+            for standard_name, aliases in DICTIONARY_MAP.items():
+                for alias in aliases:
+                    matching_cols = [c for c in df.columns if c.upper() == alias.upper()]
+                    if matching_cols:
+                        df.rename(columns={matching_cols[0]: standard_name}, inplace=True)
+                        break
+            
+            # FIX 2: Check if we actually found standard curves before adding
+            standard_found = [c for c in DICTIONARY_MAP.keys() if c in df.columns]
+            if not standard_found:
+                skipped_files.append(f"{file_name} (No recognized standard curves mapped)")
+                continue
+
+            columns_to_keep = ['DEPTH', 'WELL_NAME'] + list(DICTIONARY_MAP.keys())
+            existing_columns = [c for c in columns_to_keep if c in df.columns]
+            
+            all_well_data.append(df[existing_columns])
+        except Exception as e:
+            # FIX 3: Catch structural file errors to show in the UI
+            skipped_files.append(f"{file_name} (Read Error: {str(e)})")
+            
+    if all_well_data:
+        master_df = pd.concat(all_well_data, ignore_index=True)
+        curves_only = list(DICTIONARY_MAP.keys())
+        present_curves = [c for c in curves_only if c in master_df.columns]
+        master_df.dropna(subset=present_curves, how='all', inplace=True)
+        
+        master_df.to_parquet(MASTER_DATABASE_PATH, index=False)
+        return master_df, skipped_files
+    return None, skipped_files
+
+# ==========================================
+# SEPARATE FUNCTION: SISTER WELL FINDER
+# ==========================================
+def discover_sister_wells(active_df, master_df):
+    """Compares baseline Gamma Ray curves to identify matching analog wells."""
+    # We use Gamma Ray (GR) as the baseline lithology matcher
+    target_curve = 'GR' 
+    if target_curve not in active_df.columns or target_curve not in master_df.columns:
+        return []
+        
+    # Compute properties of the active well
+    active_mean = active_df[target_curve].mean()
+    
+    analogues = []
+    # Compare against every other well in the master database
+    for well_id, group in master_df.groupby('WELL_NAME'):
+        group_mean = group[target_curve].mean()
+        mean_diff = abs(active_mean - group_mean)
+        
+        analogues.append({
+            'well_name': well_id,
+            'variance_score': mean_diff,
+            'avg_val': group_mean
+        })
+        
+    # Sort so the mathematically closest well is first in the list
+    analogues = sorted(analogues, key=lambda x: x['variance_score'])
+    return analogues[:3] # Return top 3 matches
 
 def is_streamlit_cloud() -> bool:
     """
@@ -98,7 +213,78 @@ def query_local_llama(chat_history, system_context, model_name="llama3.1"):
             return f"❌ Ollama error (HTTP {resp.status_code})."
     except Exception as e:
         return f"❌ Cannot reach Ollama. Make sure it is running. Error: {e}"
-    
+
+
+# ============================================================
+# ☁️  CLOUD AI ENGINE  —  Works for anyone opening the app link
+# ============================================================
+# The Ollama engine above ONLY works when Python is running on the same
+# machine as Ollama (i.e. localhost). When this app is deployed and shared
+# as a link, every visitor's browser talks to a server that has no Ollama —
+# so the Local engine can never work for them, by design of how cloud
+# hosting works. This Cloud engine calls Anthropic's API instead, so the
+# AI Copilot works immediately for anyone who opens the app, from any device.
+#
+# SETUP: add your key to Streamlit secrets (never hardcode it in this file):
+#   Streamlit Cloud → App settings → Secrets → ANTHROPIC_API_KEY = "sk-ant-..."
+#   Local dev       → create .streamlit/secrets.toml with the same line
+# ============================================================
+
+CLOUD_MODEL = "claude-sonnet-5"
+
+
+def get_anthropic_api_key():
+    """Reads the API key from Streamlit secrets without crashing if none is configured."""
+    try:
+        return st.secrets.get("ANTHROPIC_API_KEY", None)
+    except Exception:
+        return None
+
+
+def query_cloud_claude(chat_history, system_context, images_b64=None, model=CLOUD_MODEL):
+    """Send a chat request to Anthropic's Claude API. Works from any deployment,
+    no local install required. `images_b64` (optional) attaches image(s) to the
+    most recent user turn for vision-style analysis."""
+    api_key = get_anthropic_api_key()
+    if not api_key:
+        return ("❌ No API key configured. Add `ANTHROPIC_API_KEY` to your Streamlit "
+                 "secrets to enable the Cloud AI engine, or switch to the Local (Ollama) engine.")
+
+    api_messages = []
+    last_idx = len(chat_history) - 1
+    for i, msg in enumerate(chat_history):
+        if msg["role"] == "user" and images_b64 and i == last_idx:
+            content = [{"type": "text", "text": msg["content"]}]
+            for img_b64 in images_b64:
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}
+                })
+            api_messages.append({"role": "user", "content": content})
+        else:
+            api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {"model": model, "max_tokens": 1024, "system": system_context, "messages": api_messages}
+
+    try:
+        resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload, timeout=60)
+        if resp.status_code == 200:
+            data = resp.json()
+            text_blocks = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+            return "\n".join(text_blocks) if text_blocks else "No response from model."
+        elif resp.status_code == 401:
+            return "❌ Invalid API key. Double-check the ANTHROPIC_API_KEY value in your Streamlit secrets."
+        else:
+            return f"❌ Cloud AI error (HTTP {resp.status_code}): {resp.text[:200]}"
+    except Exception as e:
+        return f"❌ Cannot reach the Claude API. Check your internet connection. Error: {e}"
+
+
 # Initialize Chat Memory
 if 'ai_chat_history' not in st.session_state:
     st.session_state['ai_chat_history'] = []
@@ -140,19 +326,14 @@ st.markdown(
 )
 # --- GYM OFFLINE EASTER EGG ---
 def inject_offline_screen():
-    import os
-    import base64
-    import io
-    from PIL import Image
     import streamlit.components.v1 as components
 
     # Locate your exact folder structure
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     possible_names = ["gym.jpg.jpeg", "gym.jpg", "gym.jpeg", "gym.png"]
     image_path = None
     
     for name in possible_names:
-        full_path = os.path.join(script_dir, name)
+        full_path = os.path.join(SCRIPT_DIR, name)
         if os.path.exists(full_path):
             image_path = full_path
             break
@@ -272,37 +453,40 @@ st.sidebar.header("📁 Data Loading")
 # --- 📂 DUAL FILE UPLOADER ENGINE ---
 
 
-import psutil # Ensure this is at the top of your file with other imports!
-
 # 1. Custom File Upload
 uploaded_file = st.sidebar.file_uploader("Upload Your LAS File", type=['las'])
 
-# --- NEW: DYNAMIC RAM CHECK LOGIC ---
+# --- DYNAMIC RAM CHECK (soft warning, not a hard block) ---
+# LAS files are plain text and rarely huge, so this is a light safety net,
+# not a gate. A hard st.stop() here could false-block a perfectly normal
+# file on memory-constrained hosts (e.g. free-tier cloud deployments).
 if uploaded_file is not None:
-    # 1. Get uploaded file size in GB
-    file_size_gb = uploaded_file.size / (1024**3)
-    
-    # 2. Get system's currently available RAM in GB
-    available_ram_gb = psutil.virtual_memory().available / (1024**3)
-    
-    # 3. AI Heuristic: Parsing dense well logs into Pandas/Numpy takes roughly 5x the file size in RAM
-    required_ram_gb = file_size_gb * 5.0
-    
-    if required_ram_gb > available_ram_gb:
-        st.sidebar.error("⚠️ **Hardware Limit Exceeded**")
-        st.sidebar.warning(
-            f"Your PC does not have enough available RAM to safely process this file.\n\n"
-            f"• **File Size:** {file_size_gb:.2f} GB\n"
-            f"• **Required RAM:** ~{required_ram_gb:.2f} GB\n"
-            f"• **Available RAM:** {available_ram_gb:.2f} GB"
-        )
-        st.sidebar.info("💡 Please upload a smaller file, or run this application on a machine with higher RAM (e.g., 32GB+).")
-        st.stop() # This instantly stops the app from proceeding, saving the PC from crashing!
+    if not PSUTIL_AVAILABLE:
+        st.sidebar.caption("ℹ️ RAM check skipped (`psutil` not installed).")
     else:
-        st.sidebar.success(
-            f"🖥️ **System Check Passed:** Enough RAM available! "
-            f"(Required: ~{required_ram_gb:.2f} GB | Available: {available_ram_gb:.2f} GB)"
-        )
+        file_size_gb = uploaded_file.size / (1024**3)
+        available_ram_gb = psutil.virtual_memory().available / (1024**3)
+        # Rough heuristic: parsing dense well logs into Pandas/Numpy takes roughly
+        # 5x the raw file size in RAM. This is an estimate, not a hard guarantee.
+        required_ram_gb = file_size_gb * 5.0
+
+        if required_ram_gb > available_ram_gb:
+            st.sidebar.warning(
+                f"⚠️ **This file may be large for available memory.**\n\n"
+                f"• **File Size:** {file_size_gb:.2f} GB\n"
+                f"• **Estimated RAM Needed:** ~{required_ram_gb:.2f} GB\n"
+                f"• **Available RAM:** {available_ram_gb:.2f} GB\n\n"
+                f"Processing may be slow. You can still proceed if you like."
+            )
+            proceed_anyway = st.sidebar.checkbox("Proceed anyway", key="ram_override")
+            if not proceed_anyway:
+                st.sidebar.info("💡 Check the box above to continue, or upload a smaller file.")
+                st.stop()
+        else:
+            st.sidebar.success(
+                f"🖥️ **System Check Passed:** Enough RAM available! "
+                f"(Estimated need: ~{required_ram_gb:.2f} GB | Available: {available_ram_gb:.2f} GB)"
+            )
 
 # Divider or spacing
 st.sidebar.markdown("<div style='text-align: center; margin: 5px 0; opacity: 0.5;'>— OR —</div>", unsafe_allow_html=True)
@@ -317,7 +501,9 @@ if uploaded_file is not None:
     las_file_source = uploaded_file
     st.sidebar.success("✅ Custom LAS file loaded successfully!")
 elif use_demo_data:
-    demo_path = "ichthys_deep_1_wire_public_2010_sdb.las"  # Ensure the file is named this inside your project folder
+    # Resolved relative to this script's own folder (not the current working
+    # directory), so this works no matter where `streamlit run` is launched from.
+    demo_path = os.path.join(SCRIPT_DIR, "ichthys_deep_1_wire_public_2010_sdb.las")
     if os.path.exists(demo_path):
         las_file_source = demo_path
         st.sidebar.success("⚡ Demo Well (Ichthys Deep-1) active!")
@@ -326,8 +512,14 @@ elif use_demo_data:
 
 if las_file_source is not None:
     try:
-        # Determine the correct filename to track in session state
-        current_filename = uploaded_file.name if uploaded_file is not None else "demo_well.las"
+        # Build an identifier that changes whenever the actual file CONTENT changes,
+        # not just when the filename changes. Comparing filenames alone meant two
+        # different files that happened to share a name (e.g. "well.las") would
+        # incorrectly reuse stale cached data from the first upload.
+        if uploaded_file is not None:
+            current_filename = f"{uploaded_file.name}:{hashlib.md5(uploaded_file.getvalue()).hexdigest()}"
+        else:
+            current_filename = f"demo:{las_file_source}"
 
         # --- ROBUST DATA HANDLING WITH SESSION STATE ---
         if 'uploaded_filename' not in st.session_state or st.session_state.uploaded_filename != current_filename:
@@ -336,7 +528,18 @@ if las_file_source is not None:
             if isinstance(las_file_source, str):
                 las = lasio.read(las_file_source)
             else:
-                string_data = las_file_source.getvalue().decode("utf-8")
+                # Not all real-world LAS files are UTF-8 — try a few common
+                # encodings instead of hard-crashing on the first mismatch.
+                raw_bytes = las_file_source.getvalue()
+                string_data = None
+                for encoding in ("utf-8", "latin-1", "cp1252"):
+                    try:
+                        string_data = raw_bytes.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if string_data is None:
+                    string_data = raw_bytes.decode("utf-8", errors="replace")
                 las = lasio.read(string_data)
                 
             df = las.df()
@@ -390,6 +593,10 @@ if las_file_source is not None:
         df_filtered = df[(df['DEPTH'] >= depth_range[0]) & (df['DEPTH'] <= depth_range[1])].copy()
         
         well_name = las.well.WELL.value if las.well.WELL.value else "Unknown Well"
+        # Escape before it ever touches unsafe_allow_html=True — well_name comes
+        # straight from user-uploaded file content, so a crafted LAS file could
+        # otherwise inject HTML/JS into the page.
+        well_name_safe = html.escape(str(well_name))
         # --- LARGE SKY BLUE TOP BANNER ---
         st.markdown(
             f"""
@@ -407,7 +614,7 @@ if las_file_source is not None:
                         AI Petrophysics Dashboard
                     </h1>
                     <p style="color: #f0f8ff; font-size: 1.1rem; margin-top: 8px; margin-bottom: 0; font-weight: 500; font-family: sans-serif;">
-                        Active Well Reference: <span style="font-size: 1.2rem; font-weight: bold; color: #121212; background-color: rgba(255,255,255,0.75); padding: 3px 12px; border-radius: 6px; margin-left: 6px;">{well_name}</span>
+                        Active Well Reference: <span style="font-size: 1.2rem; font-weight: bold; color: #121212; background-color: rgba(255,255,255,0.75); padding: 3px 12px; border-radius: 6px; margin-left: 6px;">{well_name_safe}</span>
                     </p>
                 </div>
                 <div style="font-size: 4.5rem; opacity: 0.85; margin-right: 10px;">
@@ -463,7 +670,6 @@ if las_file_source is not None:
                         elif cleaned_name in st.session_state.master_log_df.columns:
                             st.warning(f"⚠️ Column '{cleaned_name}' already exists!")
                         else:
-                            import numpy as np
                             # Inject permanently into master session state dataframe
                             st.session_state.master_log_df[cleaned_name] = np.nan
                             df_filtered[cleaned_name] = np.nan
@@ -517,7 +723,6 @@ if las_file_source is not None:
 
                     if run_fill_down:
                         if fd_mode == "Copy 1st Row Value Down" and not df_filtered.empty:
-                            import pandas as pd
                             first_val = df_filtered[fd_col].iloc[0]
                             fd_val = float(first_val) if (not pd.isna(first_val) and first_val is not None) else 0.0
                         
@@ -558,7 +763,6 @@ if las_file_source is not None:
             if editor_state and "edited_rows" in editor_state:
                 edited_rows = editor_state["edited_rows"]
                 if edited_rows:
-                    import numpy as np
                     for row_idx_str, changes in edited_rows.items():
                         row_idx = int(row_idx_str)
                         actual_depth = df_filtered.iloc[row_idx]['DEPTH']
@@ -806,6 +1010,16 @@ if las_file_source is not None:
             with g_col1: mt_global_depth = st.slider("Isolate Depth", min_value=depth_range[0], max_value=depth_range[1], value=(depth_range[0], depth_range[1]), key="mt_global_depth")
             with g_col2: mt_global_yspc = st.number_input("Global Y Spacing", value=200.0, key="mt_global_yspc")
 
+            with st.expander("🎯 Fluid Identification Cutoffs (Sand/Shale & Pay Shading)", expanded=False):
+                st.caption("Every well/basin behaves differently — tune these instead of relying on fixed defaults.")
+                fc1, fc2 = st.columns(2)
+                with fc1:
+                    gr_cutoff = st.number_input("GR Cutoff — Sand/Shale (API):", value=75.0, step=5.0, key="mt_gr_cutoff",
+                                                 help="GR below this is treated as sand; at or above is treated as shale.")
+                with fc2:
+                    rt_cutoff = st.number_input("Resistivity Cutoff (Ω·m):", value=10.0, step=1.0, key="mt_rt_cutoff",
+                                                 help="Resistivity above this is treated as a potential hydrocarbon zone.")
+
             st.button("➕ Add New Track", on_click=add_track, type="primary")
             st.divider()
 
@@ -888,8 +1102,7 @@ if las_file_source is not None:
                 fig_mt = make_subplots(rows=1, cols=num_tracks, shared_yaxes=True, horizontal_spacing=0.02)
 
                 # --- ADVANCED FLUID MATRIX LOGIC CALCULATION ---
-                gr_cutoff = 75.0
-                rt_cutoff = 10.0
+                # gr_cutoff / rt_cutoff now come from the UI controls set above.
                 
                 # Pre-fill base flags arrays
                 is_sand = mt_df['GR'] < gr_cutoff if 'GR' in mt_df.columns else np.ones(len(mt_df), dtype=bool)
@@ -1041,7 +1254,9 @@ if las_file_source is not None:
             
             vsh_dest = st.multiselect("🔗 Send 'VSH' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="vsh_dest")
             
-            if st.button("Calculate Volume of Shale (Linear Index)"):
+            if gr_clean == gr_shale:
+                st.warning("⚠️ GR Clean and GR Shale can't be equal — pick two different values before calculating.")
+            elif st.button("Calculate Volume of Shale (Linear Index)"):
                 # 1. Calculate the curve
                 calculated_vsh = ((df_filtered[gr_curve] - gr_clean) / (gr_shale - gr_clean)).clip(0, 1)
                 
@@ -1136,7 +1351,9 @@ if las_file_source is not None:
 
             phi_dest = st.multiselect("🔗 Send 'PHID' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="phi_dest")
             
-            if st.button("Calculate Density Porosity (PhiD)"):
+            if rho_mat == rho_fl:
+                st.warning("⚠️ Matrix Density and Fluid Density can't be equal — pick two different values before calculating.")
+            elif st.button("Calculate Density Porosity (PhiD)"):
                 # 1. Calculate the curve
                 calculated_phid = ((rho_mat - df_filtered[rho_curve]) / (rho_mat - rho_fl)).clip(0, 1)
                 
@@ -1184,7 +1401,9 @@ if las_file_source is not None:
 
             phis_dest = st.multiselect("🔗 Send 'PHIS' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="phis_dest")
             
-            if st.button("Calculate Sonic Porosity (PhiS)"):
+            if dt_fl == dt_mat:
+                st.warning("⚠️ Matrix and Fluid Transit Time can't be equal — pick two different values before calculating.")
+            elif st.button("Calculate Sonic Porosity (PhiS)"):
                 # 1. Calculate the curve
                 calculated_phis = ((df_filtered[dt_curve] - dt_mat) / (dt_fl - dt_mat)).clip(0, 1)
                 
@@ -1351,10 +1570,18 @@ if las_file_source is not None:
 
                 sw_dest = st.multiselect("🔗 Send 'SW' to other viewers:", ["Recorded Logs", "Smoothed Logs", "Multi-Track Viewer"], key="sw_dest")
                 
-                if st.button("Calculate Water Saturation (Sw)"):
-                    # 1. Calculate the curve parameters
-                    f_factor = a_val / (df_filtered[poro_input] ** m_val)
-                    calculated_sw = (((f_factor * rw_val) / df_filtered[rt_curve]) ** (1/n_val)).clip(0, 1)
+                if n_val == 0:
+                    st.warning("⚠️ The 'n' exponent can't be zero.")
+                elif st.button("Calculate Water Saturation (Sw)"):
+                    # 1. Calculate the curve parameters, guarding against zero/negative
+                    # porosity and zero resistivity so bad zones produce NaN (skipped)
+                    # instead of inf or silently wrong values feeding the Net Pay flag.
+                    poro_safe = df_filtered[poro_input].where(df_filtered[poro_input] > 0)
+                    rt_safe = df_filtered[rt_curve].where(df_filtered[rt_curve] > 0)
+
+                    f_factor = a_val / (poro_safe ** m_val)
+                    sw_base = ((f_factor * rw_val) / rt_safe).clip(lower=0)  # avoid negative base ** fractional power
+                    calculated_sw = (sw_base ** (1 / n_val)).clip(0, 1)
                     
                     # 2. Save directly to master_log_df to clear the security filter
                     st.session_state.master_log_df['SW'] = calculated_sw
@@ -1570,57 +1797,192 @@ if las_file_source is not None:
 
         # --- TAB 9: MACHINE LEARNING ---
         with tab_ml:
+            # ==========================================
+            # PHASE 1: PETROPHYSICAL KNOWLEDGE BASE
+            # ==========================================
+            PETROPHYSICAL_GUIDE = {
+                "DT": {
+                    "recommended": ["NPHI", "RHOB", "GR"],
+                    "explanation": "Sonic logs (DT) are primarily driven by rock porosity and compaction. Neutron (NPHI) and Density (RHOB) are excellent physical indicators."
+                },
+                "RHOB": {
+                    "recommended": ["NPHI", "DT", "GR"],
+                    "explanation": "Bulk Density (RHOB) depends heavily on matrix lithology and fluid porosity, correlating tightly with Neutron and Sonic indicators."
+                },
+                "NPHI": {
+                    "recommended": ["RHOB", "DT", "GR"],
+                    "explanation": "Neutron Porosity (NPHI) responds to hydrogen index, pairing mathematically and physically with Density/Sonic overlays."
+                },
+                "CALI": {
+                    "recommended": ["BS", "GR"],
+                    "explanation": "Caliper (CALI) measures borehole physical geometry. It is best predicted using Bit Size (BS) or shale indicators like Gamma Ray (GR) to capture washout zones."
+                }
+            }
+            
             st.write("### AI Log Predictor (Random Forest)")
             ml_col1, ml_col2 = st.columns(2)
-            with ml_col1: target_curve = st.selectbox("Target Curve:", available_curves, index=0)
+            
+            with ml_col1:
+                target_curve = st.selectbox("Target Curve:", available_curves, index=0)
+                # Look up physical validity for the selected target curve
+                target_base = next((k for k in PETROPHYSICAL_GUIDE.keys() if k in target_curve.upper()), None)
+            
+                if target_base:
+                    rec_features = PETROPHYSICAL_GUIDE[target_base]["recommended"]
+                    explanation = PETROPHYSICAL_GUIDE[target_base]["explanation"]
+                    
+                    st.info(f"💡 **Petrophysical Guidance for {target_curve}:** {explanation}")
+                    st.caption(f"👍 **Highly Recommended Features to use:** {', '.join(rec_features)}")
+            
             with ml_col2:
                 default_features = [c for c in available_curves if c != target_curve][:3]
                 feature_curves = st.multiselect("Feature Curves:", available_curves, default=default_features)
+                
+                # Validate user feature selections against physical recommendations
+                if target_base and feature_curves:
+                    selected_upper = [f.upper() for f in feature_curves]
+                    has_valid_pair = any(any(rec in sel for sel in selected_upper) for rec in PETROPHYSICAL_GUIDE[target_base]["recommended"])
+                    
+                    if not has_valid_pair:
+                        st.warning(
+                            "⚠️ **Geological Disconnect Detected:** The selected feature curves do not share a known "
+                            "physical dependency with your target curve. The algorithm will still compute a mathematical match, "
+                            "but the resulting synthetic profile may be scientifically invalid."
+                        )
+                        
+            # ==========================================
+            # PHASE 3: GLOBAL DATA CENTER UI
+            # ==========================================
+            st.divider()
+            st.subheader("Global Subsurface Learning Engine")
+        
+            # Button to trigger a background sweep of the database folder
+            if st.button("🔄 Sync & Rebuild Global Repository Data"):
+                with st.spinner("Parsing repository wells and standardizing logs..."):
+                    # Unpack the two returned items
+                    master_df, skipped = rebuild_master_subsurface_database()
+                    
+                    if master_df is not None:
+                        st.success(f"Successfully compiled database! Total data points: {len(master_df)} across {master_df['WELL_NAME'].nunique()} compiled files.")
+                        
+                        # Display transparent warnings for skipped files
+                        if skipped:
+                            st.warning("⚠️ **Some files were ignored:**")
+                            for skip_msg in skipped:
+                                st.write(f"- {skip_msg}")
+                    else:
+                        st.warning("The repository folder is currently empty or no files contained valid standard log curves.")
+        
+            # ML Source Selector toggle
+            training_mode = st.radio(
+                "Select Model Training Data Range:",
+                ["Current Well Only (Local Mode)", "All Repository Wells Combined (Global Data Center Mode)"]
+            )
+        
+            # Set the active training dataframe based on user selection
+            if training_mode == "All Repository Wells Combined (Global Data Center Mode)":
+                if os.path.exists(MASTER_DATABASE_PATH):
+                    training_df = pd.read_parquet(MASTER_DATABASE_PATH)
+                    st.info(f" **Global Mode Active:** Training model on {len(training_df):,} historical data points.")
+                    # --- PHASE 4: SISTER WELL DISCOVERY UI ---
+                    sister_wells = discover_sister_wells(df_filtered, training_df)
+                    if sister_wells and sister_wells[0]['variance_score'] > 0.01: # Avoid matching with itself
+                        st.success(
+                            f"🏢 **Lithological Analog Discovered:** Based on GR footprint, your active wellbore shows "
+                            f"strong structural similarities with **{sister_wells[0]['well_name']}** "
+                            f"(Variance: {sister_wells[0]['variance_score']:.2f})."
+                        )
+                else:
+                    st.warning("No Master Database file found. Defaulting back to current active log.")
+                    training_df = df_filtered.copy()
+            else:
+                training_df = df_filtered.copy()
                 
             if st.button("Train AI & Predict"):
                 if len(feature_curves) < 1:
                     st.warning("Please select at least one Feature Curve.")
                 else:
                     with st.spinner(" Training Random Forest Model... Please wait!"):
-                        ml_data = df_filtered[feature_curves + [target_curve, 'DEPTH']].dropna()
-                        if len(ml_data) < 50: st.error("Not enough valid data points.")
-                        else:
-                            X, y = ml_data[feature_curves], ml_data[target_curve]
-                            model = RandomForestRegressor(n_estimators=50, random_state=42)
-                            model.fit(X, y)
-                            
-                            pred_name = f'{target_curve}_PREDICTED'
-                            predict_df = df_filtered.dropna(subset=feature_curves).copy()
-                            predict_df[pred_name] = model.predict(predict_df[feature_curves])
-                            st.session_state.df[pred_name] = np.nan
-                            st.session_state.df.loc[predict_df.index, pred_name] = predict_df[pred_name]
-                            
-                            # Add AI curve to global list
-                            if pred_name not in st.session_state.available_curves:
-                                st.session_state.available_curves.append(pred_name)
-                            
-                            st.success(f"Accuracy (R² Score): {model.score(X, y):.2f}. '{pred_name}' added globally.")
-                            
-                            fig_ml = go.Figure()
-                            fig_ml.add_trace(go.Scatter(x=ml_data[target_curve], y=ml_data['DEPTH'], mode='lines', name=f'Original {target_curve}', line=dict(color='black', width=3)))
-                            fig_ml.add_trace(go.Scatter(x=predict_df[pred_name], y=predict_df['DEPTH'], mode='lines', name=f'AI Predicted', line=dict(color='red', width=2, dash='dash')))
-                            fig_ml.update_yaxes(autorange="reversed")
-                            fig_ml.update_layout(
-                                margin=dict(t=150, b=20, l=50, r=20),
-                                legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)")
-                            )
-                            st.plotly_chart(fig_ml, use_container_width=True)
-                            st.session_state['ml_fig'] = fig_ml
+                        # 1. Clean the training data
+                        ml_train_data = training_df.dropna(subset=feature_curves + [target_curve])
+                        X_model = ml_train_data[feature_curves]
+                        y_model = ml_train_data[target_curve]
 
+                        # 2. Split into Train & Test (FIXED)
+                        X_train, X_test, y_train, y_test = train_test_split(
+                            X_model, y_model, test_size=0.2, random_state=42
+                        )
+
+                        # 3. Train the Model
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X_train, y_train)
+
+                        train_r2 = model.score(X_train, y_train)
+                        test_r2 = model.score(X_test, y_test)
+
+                        # 4. Predict on the CURRENT well (df_filtered)
+                        pred_name = f'{target_curve}_PREDICTED'
+                        predict_df = df_filtered.dropna(subset=feature_curves).copy()
+                        
+                        # Generate raw AI predictions
+                        raw_predictions = model.predict(predict_df[feature_curves])
+                        
+                        # --- PHASE 4: HARD PHYSICAL CONSTRAINTS ---
+                        # Prevent negative values for standard logs (Porosity, Resistivity, Sonic, Caliper cannot be < 0)
+                        raw_predictions = np.clip(raw_predictions, 0.1, None)
+                        
+                        # If predicting CALI and Bit Size (BS) is present, Caliper generally shouldn't be much smaller than the bit
+                        if "CALI" in target_curve.upper() and "BS" in predict_df.columns:
+                            bs_min = predict_df["BS"].min() - 0.25 # Allow for a tiny mudcake tolerance
+                            raw_predictions = np.clip(raw_predictions, bs_min, None)
+
+                        predict_df[pred_name] = raw_predictions
+                        
+                        st.session_state.df[pred_name] = np.nan
+                        st.session_state.df.loc[predict_df.index, pred_name] = predict_df[pred_name]
+                        
+                        # Add AI curve to global list
+                        if pred_name not in st.session_state.available_curves:
+                            st.session_state.available_curves.append(pred_name)
+
+                        st.success(f"Test R² Score: {test_r2:.2f}  (Train R²: {train_r2:.2f}). '{pred_name}' added globally.")
+                        if test_r2 < 0.3:
+                            st.warning("⚠️ Low test R² — these feature curves may not predict this target well. Try a different combination.")
+                        elif train_r2 - test_r2 > 0.3:
+                            st.info("ℹ️ Train R² is much higher than test R², which suggests the model may be overfitting.")
+                        
+                        # 5. Plot the Results (FIXED to use df_filtered)
+                        fig_ml = go.Figure()
+                        
+                        # We use df_filtered here to plot the original target curve if it exists
+                        original_plot_df = df_filtered.dropna(subset=[target_curve])
+                        fig_ml.add_trace(go.Scatter(x=original_plot_df[target_curve], y=original_plot_df['DEPTH'], mode='lines', name=f'Original {target_curve}', line=dict(color='black', width=3)))
+                        fig_ml.add_trace(go.Scatter(x=predict_df[pred_name], y=predict_df['DEPTH'], mode='lines', name=f'AI Predicted', line=dict(color='red', width=2, dash='dash')))
+                        
+                        fig_ml.update_yaxes(autorange="reversed")
+                        fig_ml.update_layout(
+                            margin=dict(t=150, b=20, l=50, r=20),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)")
+                        )
+                        st.plotly_chart(fig_ml, use_container_width=True)
+                        st.session_state['ml_fig'] = fig_ml
+                        
         # --- TAB 10: REPORT GENERATOR ---
         import datetime
         import tempfile
-        import base64
-        import os
-        from fpdf import FPDF
 
         with tab_report:  
-            
+
+            def pdf_safe_text(value):
+                """FPDF's built-in core fonts (Arial etc.) only support Latin-1.
+                LAS header/description text can legitimately contain characters
+                outside that range (°, µ, –, non-English names...) which would
+                otherwise throw and abort the whole report. Replace instead of
+                crashing."""
+                if value is None:
+                    return ""
+                return str(value).encode('latin-1', errors='replace').decode('latin-1')
+
             class PremiumPetrophysicsReport(FPDF):
                 def header(self):
                     self.set_font('Arial', 'B', 15)
@@ -1666,14 +2028,14 @@ if las_file_source is not None:
                     self.set_text_color(15, 23, 42)
                     cols = df_meta.columns.tolist()
                     for i, col in enumerate(cols):
-                        self.cell(col_widths[i], 7, str(col), border=1, fill=True, align='C')
+                        self.cell(col_widths[i], 7, pdf_safe_text(col), border=1, fill=True, align='C')
                     self.ln()
                     self.set_font('Arial', '', 8)
                     self.set_text_color(51, 65, 85)
                     for _, row in df_meta.iterrows():
                         if self.get_y() > 260: self.add_page()
                         for i, col in enumerate(cols):
-                            val_str = str(row[col])[:45]
+                            val_str = pdf_safe_text(row[col])[:45]
                             self.cell(col_widths[i], 6, f" {val_str}", border=1)
                         self.ln()
                     self.ln(3)
@@ -1757,7 +2119,7 @@ if las_file_source is not None:
                     pdf.add_sub_heading("3.6 Effective Hydrocarbon Space Porosity Matrix (PhiE)")
                     if 'fig_phie' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phie'])
 
-                    pdf.add_sub_heading("3.7 Fluid Fluid Saturation Profile (Sw - Archie)")
+                    pdf.add_sub_heading("3.7 Fluid Saturation Profile (Sw - Archie)")
                     if 'fig_sw' in st.session_state: pdf.add_plotly_track(st.session_state['fig_sw'])
 
                     pdf.add_sub_heading("3.8 Net Pay Matrix Qualifier Flags")
@@ -1777,12 +2139,26 @@ if las_file_source is not None:
 
                     # Output to Streamlit Downloader
                     try:
-                        pdf_bytes = pdf.output(dest='S').encode('latin1')
+                        # errors='replace' is a last-resort safety net: any LAS header
+                        # text (well descriptions, etc.) containing characters outside
+                        # Latin-1 (° µ – etc.) is sanitized earlier via pdf_safe_text(),
+                        # but this guards against anything that slipped through.
+                        # Modern fpdf2 outputs a bytearray directly, while legacy fpdf outputs a string.
+                        # This safely handles both to prevent encode crashes.
+                        raw_output = pdf.output()
+                        if isinstance(raw_output, str):
+                            pdf_bytes = raw_output.encode('latin1', errors='replace')
+                        else:
+                            pdf_bytes = bytes(raw_output)
                         b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                                        
                         st.success("🚀 Compilation complete! Header registry and all evaluation layers parsed cleanly.")
-                        
+
+                        # Sanitize the user-entered filename before it goes into an
+                        # HTML attribute (this markdown block uses unsafe_allow_html).
+                        safe_report_name = html.escape(report_name_input.strip() or "Petrophysics_Report")
                         download_href = f'''
-                        <a href="data:application/pdf;base64,{b64_pdf}" download="{report_name_input}.pdf" style="text-decoration: none;">
+                        <a href="data:application/pdf;base64,{b64_pdf}" download="{safe_report_name}.pdf" style="text-decoration: none;">
                             <div style="background-color: #1e3a8a; color: white; padding: 14px 28px; text-align: center; border-radius: 8px; font-weight: bold; width: 100%; margin-top: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
                                 📥 Download Comprehensive Subsurface Dossier
                             </div>
@@ -1798,12 +2174,12 @@ if las_file_source is not None:
         csv = df_filtered.to_csv(index=False).encode('utf-8')
         st.sidebar.download_button(label="⬇️ Download Processed Data (CSV)", data=csv, file_name=f"{well_name}_processed.csv", mime='text/csv')
        
-       # --- 🤖 MASTER COPILOT TOGGLE CONTROL ---
+        # --- 🤖 MASTER COPILOT TOGGLE CONTROL ---
         st.sidebar.markdown("---")
         st.sidebar.subheader("🤖 AI Petrophysics Copilot")
         copilot_enabled = st.sidebar.toggle(
             "Activate AI Copilot", value=False,
-            help="Turn on to activate local AI assistance. Requires Ollama running on YOUR computer."
+            help="Chat with an AI about your well log data — Cloud works instantly for anyone, Local runs fully offline via Ollama."
         )
 
         system_copilot_instruction = """
@@ -1812,47 +2188,150 @@ if las_file_source is not None:
         Be concise, accurate, and highly technical. If looking at an image, focus carefully on data lines, curves, grid scales, and highlighted anomalies.
         """
 
+        def render_copilot_chat(text_query_fn, vision_query_fn, engine_label):
+            """Shared chat UI used by both the Cloud and Local engines, so the
+            interaction logic (history, image attach, clear button) is written once."""
+            chat_container = st.sidebar.container(height=350)
+            with chat_container:
+                for message in st.session_state['ai_chat_history']:
+                    if message["role"] == "user":
+                        st.markdown(f"**🧑‍💻 You:** {message['content']}")
+                        if "images" in message:
+                            st.markdown(f"*(📎 {len(message['images'])} image(s) attached)*")
+                    else:
+                        st.markdown(f"**🤖 AI:** {message['content']}")
+                        st.markdown("---")
+
+            uploaded_imgs = st.sidebar.file_uploader(
+                "📎 Attach Image(s)", type=["png", "jpg", "jpeg"],
+                accept_multiple_files=True, key=f"copilot_img_{engine_label}"
+            )
+            user_query = st.sidebar.chat_input(
+                "Ask about the logs or analyze the screenshot(s)...", key=f"copilot_input_{engine_label}"
+            )
+
+            if user_query:
+                if uploaded_imgs:
+                    combined_ai_response = ""
+                    total_images = len(uploaded_imgs)
+                    for idx, uploaded_img in enumerate(uploaded_imgs, start=1):
+                        with st.sidebar.spinner(f"Analyzing image {idx}/{total_images}..."):
+                            img = Image.open(uploaded_img)
+                            if img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            img.thumbnail((800, 800))
+                            buffered = io.BytesIO()
+                            img.save(buffered, format="JPEG", quality=85)
+                            img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                            enhanced_prompt = (
+                                f"Please look extremely closely at the text, numbers, and UI "
+                                f"elements in this image to answer accurately: {user_query}"
+                            )
+                            img_response = vision_query_fn(enhanced_prompt, img_b64)
+                            combined_ai_response += (
+                                f"### 📊 Image {idx} — {uploaded_img.name}:\n{img_response}\n\n---\n\n"
+                            )
+                    st.session_state['ai_chat_history'].append({
+                        "role": "user",
+                        "content": user_query,
+                        "images": [base64.b64encode(u.getvalue()).decode("utf-8") for u in uploaded_imgs]
+                    })
+                    st.session_state['ai_chat_history'].append({
+                        "role": "assistant", "content": combined_ai_response
+                    })
+                    st.rerun()
+
+                else:
+                    st.session_state['ai_chat_history'].append({"role": "user", "content": user_query})
+                    with st.sidebar.spinner(f"Thinking with {engine_label}..."):
+                        ai_response = text_query_fn(st.session_state['ai_chat_history'])
+                    st.session_state['ai_chat_history'].append({
+                        "role": "assistant", "content": ai_response
+                    })
+                    st.rerun()
+
+            if st.sidebar.button("🗑️ Clear Chat History", key=f"copilot_clear_{engine_label}"):
+                st.session_state['ai_chat_history'] = []
+                st.rerun()
+
         if copilot_enabled:
-            # Check environment first, then Ollama status
-            ollama_info = check_ollama_status()
+            engine_choice = st.sidebar.radio(
+                "AI Engine:",
+                ["☁️ Cloud (works instantly)", "💻 Local (Ollama, fully offline)"],
+                key="ai_engine_choice",
+                help="Cloud calls Anthropic's API and works for anyone who opens this app, deployed or not. "
+                     "Local uses Ollama on YOUR machine and never sends data anywhere."
+            )
 
-            # ── ☁️ CLOUD DEPLOYMENT — feature needs local run ──────────────
-            if ollama_info["status"] == "cloud":
-                st.sidebar.warning("☁️ **Cloud Link Detected**")
-                st.sidebar.markdown(
-                    """
-**The AI Copilot cannot run via the Streamlit Cloud link.**
+            # ═══════════════════════════════════════════════════════════
+            # ☁️ CLOUD ENGINE — the fix for the old Ollama-only limitation.
+            # Works the same whether this app is run locally or deployed
+            # and opened by someone else, unlike a localhost-only engine.
+            # ═══════════════════════════════════════════════════════════
+            if engine_choice.startswith("☁️"):
+                if not get_anthropic_api_key():
+                    st.sidebar.warning("⚠️ **No API key configured**")
+                    st.sidebar.markdown(
+                        """
+**Add an Anthropic API key to enable the Cloud engine:**
 
-When you open the app from `streamlit.app`, Python runs on Streamlit's servers
-in a data center — not on your computer. So `localhost:11434` points to
-*their* machine (which has no Ollama), not yours.
+**Deployed on Streamlit Cloud:**
+App settings → Secrets → add:
+```
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
 
-**This is not a bug.** It is how cloud hosting works.
+**Running locally:**
+Create `.streamlit/secrets.toml` in your project folder with the same line.
 
----
+Get a key at [console.anthropic.com](https://console.anthropic.com/).
+Or switch to the **Local (Ollama)** engine above to run fully offline instead.
+                        """
+                    )
+                else:
+                    st.sidebar.success("✅ **AI Copilot Ready (Cloud)**")
+                    render_copilot_chat(
+                        text_query_fn=lambda history: query_cloud_claude(history, system_copilot_instruction),
+                        vision_query_fn=lambda prompt, img_b64: query_cloud_claude(
+                            [{"role": "user", "content": prompt}], system_copilot_instruction, images_b64=[img_b64]
+                        ),
+                        engine_label="Cloud"
+                    )
 
-**✅ To use the AI Copilot, run the app locally:**
+            # ═══════════════════════════════════════════════════════════
+            # 💻 LOCAL ENGINE — Ollama running on the visitor's own machine.
+            # Only reachable when Python and Ollama share the same host,
+            # i.e. when `streamlit run app.py` is launched locally.
+            # ═══════════════════════════════════════════════════════════
+            else:
+                ollama_info = check_ollama_status()
 
-1. Open **VS Code** (or any terminal)
-2. Navigate to your project folder
-3. Run this command:
+                if ollama_info["status"] == "cloud":
+                    st.sidebar.warning("☁️ **Cloud Link Detected**")
+                    st.sidebar.markdown(
+                        """
+**The Local engine needs Ollama on the SAME machine running this app.**
+
+When this app is opened via a deployed link, Python runs on a remote
+server — not your computer — so it can never reach an Ollama instance
+on your laptop. This isn't a bug, it's how cloud hosting works.
+
+**✅ Easiest fix:** switch to the **☁️ Cloud** engine above — it works
+immediately, no setup required.
+
+**Or, to use Local specifically:** run this app on your own machine:
 ```
 streamlit run app.py
 ```
-4. Open **http://localhost:8501** in your browser
-5. Toggle the AI Copilot on — it will connect to your local Ollama instantly.
+then open **http://localhost:8501** and switch to Local mode there.
+                        """
+                    )
 
-*The cloud link is great for sharing the petrophysics tools.
-The AI Copilot is a local-only bonus feature.*
-                    """
-                )
-
-            # ── ❌ OLLAMA NOT RUNNING (local machine, but Ollama is off) ──
-            elif ollama_info["status"] == "offline":
-                st.sidebar.error("❌ **Ollama Not Running**")
-                st.sidebar.markdown(
-                    """
-**The AI Copilot needs Ollama running on your computer.**
+                elif ollama_info["status"] == "offline":
+                    st.sidebar.error("❌ **Ollama Not Running**")
+                    st.sidebar.markdown(
+                        """
+**The Local engine needs Ollama running on your computer.**
 
 **Haven't installed Ollama yet?**
 1. Download from [ollama.com](https://ollama.com/)
@@ -1867,94 +2346,33 @@ ollama pull moondream
 - Run `ollama serve` in a terminal
 
 Then click **Re-check** below 👇
-                    """
-                )
-                if st.sidebar.button("🔄 Re-check Ollama", type="primary"):
-                    st.rerun()
-
-            # ── ⚠️ OLLAMA RUNNING BUT MODELS MISSING ──────────────────────
-            elif ollama_info["status"] == "missing_models":
-                missing_list = ollama_info["missing"]
-                st.sidebar.warning(f"⚠️ **Ollama running — {len(missing_list)} model(s) missing**")
-                st.sidebar.write("Open a terminal and run:")
-                for m in missing_list:
-                    st.sidebar.code(f"ollama pull {m}", language="bash")
-                st.sidebar.caption("After the download finishes (shows 100%), click Re-check.")
-                if st.sidebar.button("🔄 Re-check Models", type="primary"):
-                    st.rerun()
-
-            # ── ✅ FULLY READY ─────────────────────────────────────────────
-            else:
-                st.sidebar.success("✅ **AI Copilot Ready**")
-
-                chat_container = st.sidebar.container(height=350)
-                with chat_container:
-                    for message in st.session_state['ai_chat_history']:
-                        if message["role"] == "user":
-                            st.markdown(f"**🧑‍💻 You:** {message['content']}")
-                            if "images" in message:
-                                st.markdown(f"*(📎 {len(message['images'])} image(s) attached)*")
-                        else:
-                            st.markdown(f"**🤖 AI:** {message['content']}")
-                            st.markdown("---")
-
-                uploaded_imgs = st.sidebar.file_uploader(
-                    "📎 Attach Image(s)", type=["png", "jpg", "jpeg"],
-                    accept_multiple_files=True
-                )
-                user_query = st.sidebar.chat_input("Ask about the logs or analyze the screenshot(s)...")
-
-                if user_query:
-                    if uploaded_imgs:
-                        combined_ai_response = ""
-                        total_images = len(uploaded_imgs)
-                        for idx, uploaded_img in enumerate(uploaded_imgs, start=1):
-                            with st.sidebar.spinner(f"Analyzing image {idx}/{total_images} with moondream..."):
-                                img = Image.open(uploaded_img)
-                                if img.mode != 'RGB':
-                                    img = img.convert('RGB')
-                                img.thumbnail((800, 800))
-                                buffered = io.BytesIO()
-                                img.save(buffered, format="JPEG", quality=85)
-                                img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                                enhanced_prompt = (
-                                    f"Please look extremely closely at the text, numbers, and UI "
-                                    f"elements in this image to answer accurately: {user_query}"
-                                )
-                                img_response = query_local_llama(
-                                    chat_history=[{"role": "user", "content": enhanced_prompt, "images": [img_b64]}],
-                                    system_context=system_copilot_instruction,
-                                    model_name="moondream"
-                                )
-                                combined_ai_response += (
-                                    f"### 📊 Image {idx} — {uploaded_img.name}:\n{img_response}\n\n---\n\n"
-                                )
-                        st.session_state['ai_chat_history'].append({
-                            "role": "user",
-                            "content": user_query,
-                            "images": [base64.b64encode(u.getvalue()).decode("utf-8") for u in uploaded_imgs]
-                        })
-                        st.session_state['ai_chat_history'].append({
-                            "role": "assistant", "content": combined_ai_response
-                        })
+                        """
+                    )
+                    if st.sidebar.button("🔄 Re-check Ollama", type="primary"):
                         st.rerun()
 
-                    else:
-                        st.session_state['ai_chat_history'].append({"role": "user", "content": user_query})
-                        with st.sidebar.spinner("Thinking with llama3.1..."):
-                            ai_response = query_local_llama(
-                                chat_history=st.session_state['ai_chat_history'],
-                                system_context=system_copilot_instruction,
-                                model_name="llama3.1"
-                            )
-                        st.session_state['ai_chat_history'].append({
-                            "role": "assistant", "content": ai_response
-                        })
+                elif ollama_info["status"] == "missing_models":
+                    missing_list = ollama_info["missing"]
+                    st.sidebar.warning(f"⚠️ **Ollama running — {len(missing_list)} model(s) missing**")
+                    st.sidebar.write("Open a terminal and run:")
+                    for m in missing_list:
+                        st.sidebar.code(f"ollama pull {m}", language="bash")
+                    st.sidebar.caption("After the download finishes (shows 100%), click Re-check.")
+                    if st.sidebar.button("🔄 Re-check Models", type="primary"):
                         st.rerun()
 
-                if st.sidebar.button("🗑️ Clear Chat History"):
-                    st.session_state['ai_chat_history'] = []
-                    st.rerun()
+                else:
+                    st.sidebar.success("✅ **AI Copilot Ready (Local)**")
+                    render_copilot_chat(
+                        text_query_fn=lambda history: query_local_llama(
+                            history, system_copilot_instruction, model_name="llama3.1"
+                        ),
+                        vision_query_fn=lambda prompt, img_b64: query_local_llama(
+                            [{"role": "user", "content": prompt, "images": [img_b64]}],
+                            system_copilot_instruction, model_name="moondream"
+                        ),
+                        engine_label="Local"
+                    )
 
         else:
             st.sidebar.info("💡 AI Copilot is off. Toggle it on above to start chatting with your well log data.")
@@ -1964,15 +2382,12 @@ Then click **Re-check** below 👇
 
 else:
     # --- MODERN WELCOME LANDING PAGE UI ---
-    import os
-    
     # Locate rig image path safely using structural file system verification
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     possible_rig_names = ["rig.jpg.jpeg", "rig.jpg", "rig.jpeg", "rig.png"]
     rig_image_path = None
     
     for name in possible_rig_names:
-        full_path = os.path.join(script_dir, name)
+        full_path = os.path.join(SCRIPT_DIR, name)
         if os.path.exists(full_path):
             rig_image_path = full_path
             break
