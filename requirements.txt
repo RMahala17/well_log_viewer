@@ -7,3 +7,7 @@ scikit-learn
 fpdf
 kaleido
 psutil
+requests
+Pillow
+anthropic
+pyarrow
