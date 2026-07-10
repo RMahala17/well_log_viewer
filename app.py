@@ -376,7 +376,7 @@ def inject_offline_screen():
                         
                         var imgHtml = imgData ? '<img src="' + imgData + '" style="max-width:90%; max-height:50vh; border-radius:15px; margin-bottom:15px; box-shadow: 0 4px 15px rgba(0,0,0,0.8);">' : '<div style="font-size:100px; margin-bottom:20px;">💪</div>';
                         
-                        offlineScreen.innerHTML = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background-color:#121212; color:white; font-family:sans-serif; text-align:center; padding:20px;">' + imgHtml + '<h1 style="font-size: 2.2rem; margin-top: 15px; color: #ff4b4b; font-weight: bold; line-height: 1.4;">Bhai internet connect nhi h <br> chl GYM chlte h well logging baad me pd lenge 💪</h1></div>';
+                        offlineScreen.innerHTML = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background-color:#121212; color:white; font-family:sans-serif; text-align:center; padding:20px;">' + imgHtml + '<h1 style="font-size: 2.2rem; margin-top: 15px; color: #ff4b4b; font-weight: bold; line-height: 1.4;">NO INTERNET CONNECTION</h1></div>';
                         
                         offlineScreen.style.cssText = 'display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9999999; background-color:#121212;';
                         parentDoc.body.appendChild(offlineScreen);
