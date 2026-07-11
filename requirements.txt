@@ -5,10 +5,9 @@ lasio
 plotly
 scikit-learn
 fpdf
-kaleido
+kaleido==0.2.1
 psutil
 requests
 Pillow
 anthropic
 pyarrow
-streamlit== 1.57.0
