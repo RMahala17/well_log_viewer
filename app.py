@@ -1970,9 +1970,14 @@ if las_file_source is not None:
         # --- TAB 10: REPORT GENERATOR ---
         import datetime
         import tempfile
-
+        import io
+        import gc
+        import base64
+        import html
+        import os
+        
         with tab_report:  
-
+        
             def pdf_safe_text(value):
                 """FPDF's built-in core fonts (Arial etc.) only support Latin-1.
                 LAS header/description text can legitimately contain characters
@@ -1982,7 +1987,7 @@ if las_file_source is not None:
                 if value is None:
                     return ""
                 return str(value).encode('latin-1', errors='replace').decode('latin-1')
-
+        
             class PremiumPetrophysicsReport(FPDF):
                 def header(self):
                     self.set_font('Arial', 'B', 15)
@@ -1992,13 +1997,13 @@ if las_file_source is not None:
                     self.set_text_color(100, 116, 139)
                     self.cell(0, 5, f'Report Timestamp: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}', border=0, ln=1, align='C')
                     self.ln(6)
-
+        
                 def footer(self):
                     self.set_y(-15)
                     self.set_font('Arial', 'I', 8)
                     self.set_text_color(148, 163, 184)
                     self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
+        
                 def add_main_heading(self, title):
                     self.ln(4)
                     self.set_font('Arial', 'B', 12)
@@ -2006,14 +2011,14 @@ if las_file_source is not None:
                     self.set_text_color(255, 255, 255)
                     self.cell(0, 9, f'  {title}', border=0, ln=1, align='L', fill=True)
                     self.ln(2)
-
+        
                 def add_sub_heading(self, title):
                     self.set_font('Arial', 'B', 10)
                     self.set_fill_color(241, 245, 249)
                     self.set_text_color(15, 23, 42)
                     self.cell(0, 7, f'  {title}', border=0, ln=1, align='L', fill=True)
                     self.ln(2)
-
+        
                 def add_metric_row(self, label, value, unit=""):
                     self.set_font('Arial', 'B', 10)
                     self.set_text_color(71, 85, 105)
@@ -2021,7 +2026,7 @@ if las_file_source is not None:
                     self.set_font('Arial', '', 10)
                     self.set_text_color(15, 23, 42)
                     self.cell(115, 7, f" {value} {unit}", border=1, ln=1)
-
+        
                 def add_metadata_table(self, df_meta, col_widths=[30, 25, 55, 80]):
                     self.set_font('Arial', 'B', 9)
                     self.set_fill_color(226, 232, 240)
@@ -2039,27 +2044,35 @@ if las_file_source is not None:
                             self.cell(col_widths[i], 6, f" {val_str}", border=1)
                         self.ln()
                     self.ln(3)
-
+        
                 def add_plotly_track(self, fig, width=175):
                     try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-                            fig.write_image(tmpfile.name, format="png", width=850, height=450)
-                            if self.get_y() > 190: self.add_page()
-                            self.image(tmpfile.name, w=width)
-                            self.ln(4)
-                        os.remove(tmpfile.name)
+                        # Use in-memory buffer to save RAM instead of writing to disk
+                        img_buffer = io.BytesIO()
+                        fig.write_image(img_buffer, format="png", width=850, height=450)
+                        
+                        if self.get_y() > 190: self.add_page()
+                        self.image(img_buffer, w=width)
+                        self.ln(4)
+                        
+                        # Close the buffer immediately
+                        img_buffer.close()
+                        
+                        # Force Python to clear the kaleido renderer from memory
+                        gc.collect()
+                        
                     except Exception as e:
                         self.set_font('Arial', 'I', 9)
                         self.set_text_color(220, 38, 38)
                         self.cell(0, 7, f"  [Log image profile compiled via system cache. Engine status offline: {e}]", ln=1)
                         self.ln(2)
-
+        
             # Execution Interface
             st.markdown("### 📄 Enterprise Report Generation Hub")
             st.markdown("Compile all operations, LAS text headings, custom smoothing logs, and complete 10-track Formation Evaluations into a structured asset dossier.")
-
+        
             report_name_input = st.text_input("Enter Output Asset Document Name:", value="Complete_Field_Petrophysics_Report")
-
+        
             if st.button("Compile Full Report Suite", type="primary"):
                 with st.spinner("Analyzing log archives, mining metadata, and rendering charts..."):
                     
@@ -2080,20 +2093,20 @@ if las_file_source is not None:
                         pdf.add_sub_heading("2.1 Baseline Recorded Signal Array")
                         for idx, rec_fig in enumerate(st.session_state['recorded_logs_figs_list']):
                             pdf.add_plotly_track(rec_fig)
-
+        
                     # Loop through ALL Smoothed Logs charts
                     if 'smoothed_logs_figs_list' in st.session_state and len(st.session_state['smoothed_logs_figs_list']) > 0:
                         pdf.add_sub_heading("2.2 De-noised / Smoothed Evaluation Signal Array")
                         for idx, sm_fig in enumerate(st.session_state['smoothed_logs_figs_list']):
                             pdf.add_plotly_track(sm_fig)
-
+        
                     # Loop through ALL Histogram charts
                     if 'histogram_figs_list' in st.session_state and len(st.session_state['histogram_figs_list']) > 0:
                         pdf.add_sub_heading("2.3 Data Distribution Diagnostics (Histograms)")
                         for idx, hist_fig in enumerate(st.session_state['histogram_figs_list']):
                             pdf.add_plotly_track(hist_fig)
-
-                    # ✅ THIS IS WHAT PULLS THE MULTI-TRACK VIEWER INTO THE REPORT
+        
+                    # THIS IS WHAT PULLS THE MULTI-TRACK VIEWER INTO THE REPORT
                     if 'multi_track_fig' in st.session_state:
                         pdf.add_sub_heading("2.4 Unified Composite Multi-Track Viewer Profile")
                         pdf.add_plotly_track(st.session_state['multi_track_fig'])
@@ -2106,28 +2119,28 @@ if las_file_source is not None:
                     
                     pdf.add_sub_heading("3.2 Non-Linear Shale Correction (Larionov)")
                     if 'fig_vshc' in st.session_state: pdf.add_plotly_track(st.session_state['fig_vshc'])
-
+        
                     pdf.add_sub_heading("3.3 Bulk Density Porosity Profile (PhiD)")
                     if 'fig_phi' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phi'])
-
+        
                     pdf.add_sub_heading("3.4 Acoustic Sonic Porosity Profile (PhiS)")
                     if 'fig_phis' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phis'])
-
+        
                     pdf.add_sub_heading("3.5 Total Combination Porosity Matrix (PhiT)")
                     if 'fig_phit' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phit'])
-
+        
                     pdf.add_sub_heading("3.6 Effective Hydrocarbon Space Porosity Matrix (PhiE)")
                     if 'fig_phie' in st.session_state: pdf.add_plotly_track(st.session_state['fig_phie'])
-
+        
                     pdf.add_sub_heading("3.7 Fluid Saturation Profile (Sw - Archie)")
                     if 'fig_sw' in st.session_state: pdf.add_plotly_track(st.session_state['fig_sw'])
-
+        
                     pdf.add_sub_heading("3.8 Net Pay Matrix Qualifier Flags")
                     if 'fig_res' in st.session_state: pdf.add_plotly_track(st.session_state['fig_res'])
-
+        
                     pdf.add_sub_heading("3.9 Structural Rock Physics & Elastic Impedance Profiles")
                     if 'fig_rp' in st.session_state: pdf.add_plotly_track(st.session_state['fig_rp'])
-
+        
                     # --- SECTION 4: DIAGNOSTICS & ML ---
                     pdf.add_main_heading("4. Crossplots & Automated Intelligence Profiles")
                     if 'crossplot_fig' in st.session_state:
@@ -2136,7 +2149,7 @@ if las_file_source is not None:
                     if 'ml_fig' in st.session_state:
                         pdf.add_sub_heading("4.2 AI Synthetic Log Verification Vector (Actual vs Predicted)")
                         pdf.add_plotly_track(st.session_state['ml_fig'])
-
+        
                     # Output to Streamlit Downloader
                     try:
                         # errors='replace' is a last-resort safety net: any LAS header
@@ -2153,7 +2166,7 @@ if las_file_source is not None:
                         b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
                                         
                         st.success("🚀 Compilation complete! Header registry and all evaluation layers parsed cleanly.")
-
+        
                         # Sanitize the user-entered filename before it goes into an
                         # HTML attribute (this markdown block uses unsafe_allow_html).
                         safe_report_name = html.escape(report_name_input.strip() or "Petrophysics_Report")
@@ -2167,7 +2180,7 @@ if las_file_source is not None:
                         st.markdown(download_href, unsafe_allow_html=True)
                     except Exception as e:
                         st.error(f"Asset compiling fault detected: {e}")
-                        
+                
         # --- EXPORT DATA ENGINE ---
         st.sidebar.markdown("---")
         st.sidebar.header("💾 Export Data")
