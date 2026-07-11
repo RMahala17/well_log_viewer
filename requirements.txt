@@ -4,7 +4,7 @@ numpy
 lasio
 plotly
 scikit-learn
-fpdf
+fpdf2>=2.7.9
 kaleido
 psutil
 requests

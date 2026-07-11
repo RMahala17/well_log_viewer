@@ -2163,24 +2163,45 @@ if las_file_source is not None:
                             pdf_bytes = raw_output.encode('latin1', errors='replace')
                         else:
                             pdf_bytes = bytes(raw_output)
-                        b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                                        
+
+                        # --- FIX: don't embed the file as a base64 data-URI <a href> link ---
+                        # The old code built a giant base64 string (file size x~1.33) and
+                        # injected it into the page via st.markdown(unsafe_allow_html=True).
+                        # That round-trips fine on localhost, but over the network on
+                        # Streamlit Community Cloud that huge single payload can get
+                        # truncated/corrupted in transit or when the browser's data-URI
+                        # download handling kicks in - producing a PDF that "compiles"
+                        # successfully server-side but fails to open once downloaded
+                        # ("We can't open this file / Something went wrong").
+                        # st.download_button streams the bytes through Streamlit's own
+                        # file-serving endpoint instead, which is the reliable, native
+                        # way to offer downloads and sidesteps that failure mode.
+                        safe_report_name = "".join(
+                            c for c in (report_name_input.strip() or "Petrophysics_Report")
+                            if c.isalnum() or c in (" ", "_", "-")
+                        ).strip() or "Petrophysics_Report"
+
+                        st.session_state['generated_report_bytes'] = pdf_bytes
+                        st.session_state['generated_report_name'] = f"{safe_report_name}.pdf"
                         st.success("🚀 Compilation complete! Header registry and all evaluation layers parsed cleanly.")
-        
-                        # Sanitize the user-entered filename before it goes into an
-                        # HTML attribute (this markdown block uses unsafe_allow_html).
-                        safe_report_name = html.escape(report_name_input.strip() or "Petrophysics_Report")
-                        download_href = f'''
-                        <a href="data:application/pdf;base64,{b64_pdf}" download="{safe_report_name}.pdf" style="text-decoration: none;">
-                            <div style="background-color: #1e3a8a; color: white; padding: 14px 28px; text-align: center; border-radius: 8px; font-weight: bold; width: 100%; margin-top: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-                                📥 Download Comprehensive Subsurface Dossier
-                            </div>
-                        </a>
-                        '''
-                        st.markdown(download_href, unsafe_allow_html=True)
                     except Exception as e:
                         st.error(f"Asset compiling fault detected: {e}")
-                
+
+            # Rendered outside the "Compile" button's if-block on purpose:
+            # st.download_button triggers its own script rerun the moment it's
+            # clicked, which would make st.button(...) above evaluate to False
+            # again on that rerun and the button would vanish mid-download.
+            # Keeping the PDF bytes in session_state means the download button
+            # stays put across reruns, so the download reliably completes.
+            if 'generated_report_bytes' in st.session_state:
+                st.download_button(
+                    label="📥 Download Comprehensive Subsurface Dossier",
+                    data=st.session_state['generated_report_bytes'],
+                    file_name=st.session_state.get('generated_report_name', 'Petrophysics_Report.pdf'),
+                    mime="application/pdf",
+                    type="primary",
+                    use_container_width=True,
+                )
         # --- EXPORT DATA ENGINE ---
         st.sidebar.markdown("---")
         st.sidebar.header("💾 Export Data")
