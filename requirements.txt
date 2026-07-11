@@ -11,4 +11,3 @@ requests
 Pillow
 anthropic
 pyarrow
-streamlit== 1.57.0
