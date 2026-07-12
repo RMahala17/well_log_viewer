@@ -13,8 +13,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import uuid
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+import re
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 import requests
 
@@ -66,25 +68,206 @@ import os
 OLLAMA_BASE = "http://localhost:11434"
 REQUIRED_MODELS = ["llama3.1", "moondream"]
 
+# ============================================================
+# SHARED PETROPHYSICAL CURVE-FAMILY KNOWLEDGE BASE
+# ============================================================
+# A single source of truth for "what is this curve, really" — used by the
+# repository builder (rebuild_master_subsurface_database), the sister-well
+# matcher (discover_sister_wells), and the Machine Learning tab. Centralizing
+# it here means a curve is classified the same way everywhere in the app,
+# whether it's coming from the raw mnemonics in an uploaded LAS file (e.g.
+# 'ILD', 'SGR', 'RHOZ') or from the standardized columns in the repository's
+# master Parquet database.
+#
+# CURVE_FAMILY_ALIASES: family -> every raw mnemonic spelling recognized as
+# that family. Keys are the standardized family names used throughout the
+# app; values are alternate/vendor-specific mnemonics seen in real LAS files.
+CURVE_FAMILY_ALIASES = {
+    'GR':   ['GR', 'GRC', 'GAM', 'GAMMA', 'SGR', 'CGR', 'GRD', 'NGR', 'GRGC', 'ECGR'],
+    'CALI': ['CALI', 'CAL', 'CALS', 'CLDC', 'HCAL', 'CALX', 'CALY'],
+    'BS':   ['BS', 'BIT', 'BITSIZE', 'DBIT'],
+    'RHOB': ['RHOB', 'DEN', 'RHOZ', 'ZDEN', 'DENB', 'DENS', 'ZDNC'],
+    'NPHI': ['NPHI', 'NEU', 'TNPH', 'NPOR', 'CNPOR', 'NEUT'],
+    'DT':   ['DT', 'DTC', 'AC', 'SONIC', 'DTCO', 'DTCOMP'],
+    'DTS':  ['DTS', 'DTSM', 'DTSH'],
+    'PEF':  ['PEF', 'PE', 'PEFZ'],
+    'RT':   ['RT', 'RESD', 'ILD', 'LLD', 'RD', 'RILD', 'AT90', 'AT60', 'AT30', 'AT20', 'AT10',
+             'AF90', 'AF60', 'AF30', 'AF20', 'AF10', 'ILM', 'LLS', 'RESM', 'RS', 'RESS',
+             'MSFL', 'SFLU', 'SFL', 'MLL', 'RXO', 'RESISTIVITY'],
+    'SP':   ['SP', 'SPON', 'SSP'],
+    'VSH':  ['VSH', 'VCL', 'VSHALE', 'ISHALE', 'VCLGR'],
+    'PHIE': ['PHIE', 'PHIT', 'PHI', 'PHIN', 'EPOR'],
+    'SW':   ['SW', 'SWE', 'SWT', 'SWIRR'],
+    'PERM': ['PERM', 'PERMEABILITY', 'KLOGH', 'KINT', 'K'],
+    'DRHO': ['DRHO', 'HDRA', 'DRH'],
+}
+
+# Human-readable display labels for each family, used in UI messages.
+CURVE_FAMILY_LABELS = {
+    'GR': 'Gamma Ray', 'CALI': 'Caliper', 'BS': 'Bit Size', 'RHOB': 'Bulk Density',
+    'NPHI': 'Neutron Porosity', 'DT': 'Compressional Sonic', 'DTS': 'Shear Sonic',
+    'PEF': 'Photoelectric Factor', 'RT': 'Resistivity', 'SP': 'Spontaneous Potential',
+    'VSH': 'Shale Volume', 'PHIE': 'Effective Porosity', 'SW': 'Water Saturation',
+    'PERM': 'Permeability', 'DRHO': 'Density Correction',
+}
+
+# Families that are log-normally distributed in nature, so the model is
+# trained on log10(value) and converted back for prediction/scoring. This is
+# standard petrophysical practice for resistivity and permeability, which
+# otherwise skew regression fits toward their high-value outliers.
+LOG_TRANSFORM_FAMILIES = {'RT', 'PERM'}
+
+# Realistic physical clipping bounds per family — keeps ML predictions from
+# drifting into impossible values (e.g. negative bit size) outside the range
+# actually seen in the training data.
+PHYSICAL_BOUNDS = {
+    'GR': (0, 300), 'CALI': (4, 24), 'BS': (4, 24), 'RHOB': (1.0, 3.2),
+    'NPHI': (-0.05, 1.0), 'DT': (40, 240), 'DTS': (60, 500), 'PEF': (0, 10),
+    'RT': (0.05, 10000), 'SP': (-200, 50), 'VSH': (0, 1), 'PHIE': (0, 0.45),
+    'SW': (0, 1), 'PERM': (0.001, 100000), 'DRHO': (-0.5, 0.5),
+}
+
+# For every family, which OTHER families are physically related to it (i.e.
+# reasonable, non-leaky predictors) and a plain-English reason why. This
+# generalizes the old 4-curve guide (DT/RHOB/NPHI/CALI only) to every
+# standard curve type the app recognizes, per the fix requested for the ML
+# tab: every curve family gets sensible suggestions, not just Caliper.
+PETROPHYSICAL_GUIDE = {
+    'GR': {
+        'recommended': ['SP', 'CALI', 'VSH'],
+        'explanation': "Gamma Ray reflects shale/clay content. It correlates with Spontaneous Potential "
+                       "(both are lithology indicators) and often mirrors Caliper in washed-out shale zones."
+    },
+    'CALI': {
+        'recommended': ['BS', 'GR', 'RT'],
+        'explanation': "Caliper measures actual borehole diameter against the bit's nominal size. Bit Size is "
+                       "its direct mechanical reference; Gamma Ray flags the shale intervals most prone to "
+                       "washout, which also tends to depress nearby Resistivity readings."
+    },
+    'BS': {
+        'recommended': ['CALI'],
+        'explanation': "Bit Size is the nominal borehole diameter from the drilling program — essentially the "
+                       "reference value Caliper measures against, so the two move together outside washout zones."
+    },
+    'RHOB': {
+        'recommended': ['NPHI', 'DT', 'PEF'],
+        'explanation': "Bulk Density responds to matrix lithology and porosity, so it pairs tightly with Neutron "
+                       "Porosity and Sonic (both alternate porosity measurements) and shares its measurement tool with PEF."
+    },
+    'NPHI': {
+        'recommended': ['RHOB', 'DT'],
+        'explanation': "Neutron Porosity responds mainly to hydrogen index (pore fluid). It is the classic "
+                       "cross-plot partner of Bulk Density, and both correlate with Sonic through the same porosity relationship."
+    },
+    'DT': {
+        'recommended': ['RHOB', 'NPHI', 'DTS'],
+        'explanation': "Compressional sonic transit time is governed by rock compaction/porosity, which is why it "
+                       "tracks Density and Neutron Porosity. Shear Sonic, where available, is the other half of the same elastic measurement."
+    },
+    'DTS': {
+        'recommended': ['DT', 'RHOB'],
+        'explanation': "Shear sonic is acquired alongside compressional sonic and used together with it (and "
+                       "density) for rock-mechanics and fluid-substitution work."
+    },
+    'PEF': {
+        'recommended': ['RHOB'],
+        'explanation': "Photoelectric Factor is measured by the same density tool and is primarily a lithology "
+                       "(mineralogy) indicator, so it tends to move with Bulk Density's lithology-driven excursions."
+    },
+    'RT': {
+        'recommended': ['NPHI', 'RHOB', 'GR', 'SW'],
+        'explanation': "Resistivity is controlled by porosity and pore fluid (Archie's equation), so it correlates "
+                       "with the porosity logs (Neutron, Density) and with Gamma Ray's reservoir/shale distinction. "
+                       "It's also the primary input used to compute Water Saturation."
+    },
+    'SP': {
+        'recommended': ['GR', 'RT'],
+        'explanation': "Spontaneous Potential deflects with shale/sand contrast and formation-water/mud-filtrate "
+                       "resistivity contrast, so it tends to track Gamma Ray lithology breaks and correlates with nearby Resistivity."
+    },
+    'VSH': {
+        'recommended': ['GR', 'SP'],
+        'explanation': "Shale Volume is normally derived directly from Gamma Ray (and sometimes SP), making both "
+                       "of them its strongest, most direct predictors."
+    },
+    'PHIE': {
+        'recommended': ['RHOB', 'NPHI', 'DT'],
+        'explanation': "Effective Porosity is computed from the porosity-sensitive logs, so Density, Neutron, and "
+                       "Sonic all carry essentially the same underlying signal."
+    },
+    'SW': {
+        'recommended': ['RT', 'PHIE', 'VSH'],
+        'explanation': "Water Saturation is derived from Resistivity through Archie's equation, moderated by "
+                       "porosity and shale content — making these its most physically grounded predictors."
+    },
+    'PERM': {
+        'recommended': ['PHIE', 'VSH', 'RT'],
+        'explanation': "Permeability transforms are empirically built from porosity and shale volume (and "
+                       "sometimes resistivity), since these control pore connectivity."
+    },
+    'DRHO': {
+        'recommended': ['RHOB', 'CALI'],
+        'explanation': "The density correction curve flags where borehole rugosity degraded the Bulk Density "
+                       "reading, so it tracks Caliper washout zones and, by construction, Bulk Density itself."
+    },
+}
+
+
+def classify_curve(curve_name, alias_map=None):
+    """Classifies a raw LAS curve mnemonic (e.g. 'ILD', 'SGR', 'RHOZ') into its
+    standardized petrophysical family (e.g. 'RT', 'GR', 'RHOB'), or returns
+    None if the curve isn't recognized.
+
+    Matching happens in three tiers, from most to least confident, so that
+    common real-world mnemonics are classified correctly while avoiding false
+    positives (e.g. a naive substring search would wrongly match the 'BS'
+    family inside an unrelated mnemonic like 'SUBSEA'):
+
+      1. Exact match against the family name or one of its known aliases.
+      2. Token match — the curve name is split on non-alphanumeric characters
+         (so 'GR_1' -> ['GR', '1']) and each token is checked exactly.
+      3. Substring fallback (longest alias first) for unusual mnemonics that
+         don't match cleanly — better-than-nothing, used only as a last resort.
+    """
+    if not curve_name:
+        return None
+    alias_map = alias_map if alias_map is not None else CURVE_FAMILY_ALIASES
+    name = str(curve_name).strip().upper()
+
+    # Tier 1: exact match.
+    for family, aliases in alias_map.items():
+        if name == family or name in aliases:
+            return family
+
+    # Tier 2: tokenized match.
+    tokens = set(re.split(r'[^A-Z0-9]+', name)) - {''}
+    for family, aliases in alias_map.items():
+        if family in tokens or tokens.intersection(aliases):
+            return family
+
+    # Tier 3: substring fallback, longest alias first to minimize false positives.
+    all_aliases = sorted(
+        ((alias, family) for family, aliases in alias_map.items() for alias in aliases),
+        key=lambda pair: -len(pair[0])
+    )
+    for alias, family in all_aliases:
+        if len(alias) >= 3 and alias in name:
+            return family
+
+    return None
+
+
 def rebuild_master_subsurface_database():
     """Loops through the external data folder, normalizes columns, and saves to an optimized Parquet file."""
     all_well_data = []
     skipped_files = [] # NEW: We will track exactly what fails
-    
-    DICTIONARY_MAP = {
-        'GR': ['GR', 'GRD', 'SGR', 'NGR', 'GAMMA'],
-        'RT': ['ILD', 'ILM', 'LLD', 'RT', 'AFEC', 'RILD', 'AHT90', 'RESD', 'RESISTIVITY'],
-        'RHOB': ['RHOB', 'DEN', 'ZDEN', 'RHOZ', 'DENS', 'DENSITY'],
-        'NPHI': ['NPHI', 'CNC', 'NEUT', 'NPHI_LS', 'PORO', 'NEUTRON'],
-        'CALI': ['CALI', 'CAL', 'CALIPER'],
-        'BS': ['BS', 'BIT', 'BITSIZE'],
-        'DT': ['DT', 'AC', 'SONIC', 'DTC']
-    }
-    
+
     las_files = [f for f in os.listdir(WELL_REPOSITORY_DIR) if f.lower().endswith('.las')]
     
     if not las_files:
         return None, skipped_files # NEW: Return a tuple
+
+    all_families = list(CURVE_FAMILY_ALIASES.keys())
 
     for file_name in las_files:
         try:
@@ -97,20 +280,28 @@ def rebuild_master_subsurface_database():
             well_id = f"{header_name} [{file_name}]"
             df['WELL_NAME'] = well_id
             
-            for standard_name, aliases in DICTIONARY_MAP.items():
-                for alias in aliases:
-                    matching_cols = [c for c in df.columns if c.upper() == alias.upper()]
-                    if matching_cols:
-                        df.rename(columns={matching_cols[0]: standard_name}, inplace=True)
-                        break
+            # Standardize every column we recognize to its family name, using
+            # the SAME alias table the ML tab uses — this guarantees a curve
+            # picked in the ML tab can always be found in this repository
+            # under its family name, regardless of how the original LAS file
+            # happened to spell it (e.g. 'CAL', 'CALIPER', and 'CALI' all
+            # become 'CALI' here).
+            renamed = {}
+            for col in df.columns:
+                if col in ('DEPTH', 'WELL_NAME'):
+                    continue
+                family = classify_curve(col, CURVE_FAMILY_ALIASES)
+                if family and family not in renamed.values() and family not in df.columns:
+                    renamed[col] = family
+            df.rename(columns=renamed, inplace=True)
             
             # FIX 2: Check if we actually found standard curves before adding
-            standard_found = [c for c in DICTIONARY_MAP.keys() if c in df.columns]
+            standard_found = [c for c in all_families if c in df.columns]
             if not standard_found:
                 skipped_files.append(f"{file_name} (No recognized standard curves mapped)")
                 continue
 
-            columns_to_keep = ['DEPTH', 'WELL_NAME'] + list(DICTIONARY_MAP.keys())
+            columns_to_keep = ['DEPTH', 'WELL_NAME'] + all_families
             existing_columns = [c for c in columns_to_keep if c in df.columns]
             
             all_well_data.append(df[existing_columns])
@@ -120,8 +311,7 @@ def rebuild_master_subsurface_database():
             
     if all_well_data:
         master_df = pd.concat(all_well_data, ignore_index=True)
-        curves_only = list(DICTIONARY_MAP.keys())
-        present_curves = [c for c in curves_only if c in master_df.columns]
+        present_curves = [c for c in all_families if c in master_df.columns]
         master_df.dropna(subset=present_curves, how='all', inplace=True)
         
         master_df.to_parquet(MASTER_DATABASE_PATH, index=False)
@@ -129,33 +319,69 @@ def rebuild_master_subsurface_database():
     return None, skipped_files
 
 # ==========================================
-# SEPARATE FUNCTION: SISTER WELL FINDER
+# SISTER WELL / TARGET-CURVE MATCH FINDER
 # ==========================================
-def discover_sister_wells(active_df, master_df):
-    """Compares baseline Gamma Ray curves to identify matching analog wells."""
-    # We use Gamma Ray (GR) as the baseline lithology matcher
-    target_curve = 'GR' 
-    if target_curve not in active_df.columns or target_curve not in master_df.columns:
+def discover_sister_wells(active_df, master_df, curve_family_map, exclude_well_ids=None, top_n=5):
+    """Finds repository wells statistically similar to the active well.
+
+    Unlike comparing a single hardcoded curve (the old behavior — it always
+    used GR no matter what you were predicting), this compares whichever
+    curve families are actually in play for the current ML task (the
+    selected target curve plus its selected feature curves), using a
+    normalized distance across both the MEAN and the SPREAD (std) of each
+    shared family. A single mean comparison can call two very
+    differently-behaved wells "similar" just because they average out the
+    same, which is why the old matches were often wrong.
+
+    curve_family_map: {family_name: raw_column_name_in_active_df}, e.g.
+        {'CALI': 'CAL', 'GR': 'GR', 'BS': 'BS'} — built by the caller from
+        whatever the user actually selected as target/feature curves.
+    """
+    exclude_well_ids = set(exclude_well_ids or [])
+    families = [fam for fam in curve_family_map if fam in master_df.columns]
+    if not families or 'WELL_NAME' not in master_df.columns:
         return []
-        
-    # Compute properties of the active well
-    active_mean = active_df[target_curve].mean()
-    
-    analogues = []
-    # Compare against every other well in the master database
+
+    results = []
     for well_id, group in master_df.groupby('WELL_NAME'):
-        group_mean = group[target_curve].mean()
-        mean_diff = abs(active_mean - group_mean)
-        
-        analogues.append({
+        if well_id in exclude_well_ids:
+            continue
+
+        shared_families = []
+        distance_terms = []
+        for fam in families:
+            raw_col = curve_family_map[fam]
+            if raw_col not in active_df.columns:
+                continue
+            active_vals = pd.to_numeric(active_df[raw_col], errors='coerce').dropna()
+            well_vals = pd.to_numeric(group[fam], errors='coerce').dropna()
+            if len(active_vals) < 5 or len(well_vals) < 5:
+                continue
+
+            a_mean, a_std = float(active_vals.mean()), float(active_vals.std() or 1e-6)
+            w_mean, w_std = float(well_vals.mean()), float(well_vals.std() or 1e-6)
+            pooled_std = float(np.sqrt((a_std**2 + w_std**2) / 2)) or 1e-6
+
+            mean_term = abs(a_mean - w_mean) / pooled_std          # location difference
+            spread_term = abs(a_std - w_std) / pooled_std          # shape/variability difference
+            distance_terms.append(mean_term + 0.5 * spread_term)
+            shared_families.append(fam)
+
+        if not shared_families:
+            continue
+
+        avg_distance = float(np.mean(distance_terms))
+        # Convert distance -> an intuitive 0-100% similarity score.
+        match_pct = float(max(0.0, min(100.0, 100.0 / (1.0 + avg_distance))))
+        results.append({
             'well_name': well_id,
-            'variance_score': mean_diff,
-            'avg_val': group_mean
+            'match_score': match_pct,
+            'distance': avg_distance,
+            'curves_used': shared_families,
         })
-        
-    # Sort so the mathematically closest well is first in the list
-    analogues = sorted(analogues, key=lambda x: x['variance_score'])
-    return analogues[:3] # Return top 3 matches
+
+    results.sort(key=lambda x: x['distance'])
+    return results[:top_n]
 
 def is_streamlit_cloud() -> bool:
     """
@@ -1789,6 +2015,8 @@ if las_file_source is not None:
             if st.button("Calculate Net Pay"):
                 if not all(col in df_filtered.columns for col in [vsh_src, 'SW']) or not poro_candidates:
                     st.error("⚠️ Ensure VSH, PHI, and SW are calculated!")
+                elif len(df_filtered) < 2:
+                    st.error("⚠️ Not enough depth samples to determine a depth step.")
                 else:
                     is_pay = (df_filtered[vsh_src] <= vsh_cutoff_pay) & (df_filtered[pay_poro_input] >= phi_cutoff_pay) & (df_filtered['SW'] <= sw_cutoff_pay)
                     depth_step = abs(df_filtered['DEPTH'].iloc[1] - df_filtered['DEPTH'].iloc[0])
@@ -1797,177 +2025,442 @@ if las_file_source is not None:
 
         # --- TAB 9: MACHINE LEARNING ---
         with tab_ml:
+            st.write("### 🤖 AI Log Predictor (Auto-ML: Random Forest / Gradient Boosting / Extra Trees)")
+            st.caption(
+                "Trains a synthetic-log predictor from physically related curves, auto-selects the "
+                "best-performing algorithm, and reports honest cross-validated accuracy. Real well logs "
+                "carry measurement noise no model can perfectly remove — treat R² as a guide, not a guarantee."
+            )
+
             # ==========================================
-            # PHASE 1: PETROPHYSICAL KNOWLEDGE BASE
+            # SECTION 1: TARGET & FEATURE SELECTION
             # ==========================================
-            PETROPHYSICAL_GUIDE = {
-                "DT": {
-                    "recommended": ["NPHI", "RHOB", "GR"],
-                    "explanation": "Sonic logs (DT) are primarily driven by rock porosity and compaction. Neutron (NPHI) and Density (RHOB) are excellent physical indicators."
-                },
-                "RHOB": {
-                    "recommended": ["NPHI", "DT", "GR"],
-                    "explanation": "Bulk Density (RHOB) depends heavily on matrix lithology and fluid porosity, correlating tightly with Neutron and Sonic indicators."
-                },
-                "NPHI": {
-                    "recommended": ["RHOB", "DT", "GR"],
-                    "explanation": "Neutron Porosity (NPHI) responds to hydrogen index, pairing mathematically and physically with Density/Sonic overlays."
-                },
-                "CALI": {
-                    "recommended": ["BS", "GR"],
-                    "explanation": "Caliper (CALI) measures borehole physical geometry. It is best predicted using Bit Size (BS) or shale indicators like Gamma Ray (GR) to capture washout zones."
-                }
-            }
-            
-            st.write("### AI Log Predictor (Random Forest)")
             ml_col1, ml_col2 = st.columns(2)
-            
+
             with ml_col1:
-                target_curve = st.selectbox("Target Curve:", available_curves, index=0)
-                # Look up physical validity for the selected target curve
-                target_base = next((k for k in PETROPHYSICAL_GUIDE.keys() if k in target_curve.upper()), None)
-            
-                if target_base:
-                    rec_features = PETROPHYSICAL_GUIDE[target_base]["recommended"]
-                    explanation = PETROPHYSICAL_GUIDE[target_base]["explanation"]
-                    
-                    st.info(f"💡 **Petrophysical Guidance for {target_curve}:** {explanation}")
-                    st.caption(f"👍 **Highly Recommended Features to use:** {', '.join(rec_features)}")
-            
+                target_curve = st.selectbox("Target Curve:", available_curves, index=0, key="ml_target_curve")
+                target_family = classify_curve(target_curve)
+
+                if target_family and target_family in PETROPHYSICAL_GUIDE:
+                    rec_families = PETROPHYSICAL_GUIDE[target_family]["recommended"]
+                    explanation = PETROPHYSICAL_GUIDE[target_family]["explanation"]
+                    rec_labels = ", ".join(CURVE_FAMILY_LABELS.get(f, f) for f in rec_families)
+                    st.info(f"💡 **Petrophysical Guidance for {target_curve} ({CURVE_FAMILY_LABELS.get(target_family, target_family)}):** {explanation}")
+                    st.caption(f"👍 **Physically related curve types to look for:** {rec_labels}")
+                elif target_family:
+                    st.info(f"Recognized as **{CURVE_FAMILY_LABELS.get(target_family, target_family)}**, but this curve type isn't in the built-in recommendation guide yet.")
+                else:
+                    st.warning(f"⚠️ '{target_curve}' isn't a recognized standard curve mnemonic — feature guidance isn't available. You can still train on it using your own domain knowledge.")
+
             with ml_col2:
-                default_features = [c for c in available_curves if c != target_curve][:3]
-                feature_curves = st.multiselect("Feature Curves:", available_curves, default=default_features)
-                
-                # Validate user feature selections against physical recommendations
-                if target_base and feature_curves:
-                    selected_upper = [f.upper() for f in feature_curves]
-                    has_valid_pair = any(any(rec in sel for sel in selected_upper) for rec in PETROPHYSICAL_GUIDE[target_base]["recommended"])
-                    
-                    if not has_valid_pair:
-                        st.warning(
-                            "⚠️ **Geological Disconnect Detected:** The selected feature curves do not share a known "
-                            "physical dependency with your target curve. The algorithm will still compute a mathematical match, "
-                            "but the resulting synthetic profile may be scientifically invalid."
-                        )
-                        
+                # The target curve is deliberately excluded from the feature
+                # options — selecting a curve as its own predictor produces a
+                # trivial, meaningless "perfect" fit (data leakage).
+                feature_options = [c for c in available_curves if c != target_curve]
+
+                if target_family and target_family in PETROPHYSICAL_GUIDE:
+                    rec_families = PETROPHYSICAL_GUIDE[target_family]["recommended"]
+                    default_features = [c for c in feature_options if classify_curve(c) in rec_families]
+                    if not default_features:
+                        default_features = feature_options[:3]
+                else:
+                    default_features = feature_options[:3]
+
+                feature_curves = st.multiselect("Feature Curves:", feature_options, default=default_features, key="ml_feature_curves")
+
+            # --- Per-curve relationship assessment (works for ANY target, not just Caliper) ---
+            if feature_curves:
+                feature_status = []
+                for f in feature_curves:
+                    fam = classify_curve(f)
+                    fam_label = CURVE_FAMILY_LABELS.get(fam, fam or "Unrecognized")
+                    if fam is None:
+                        icon, note = "⚪", "Unrecognized curve type — relationship can't be judged automatically."
+                    elif target_family and fam == target_family:
+                        icon, note = "🔁", "Same family as the target — high risk of data leakage / a meaningless trivial fit."
+                    elif target_family and target_family in PETROPHYSICAL_GUIDE and fam in PETROPHYSICAL_GUIDE[target_family]["recommended"]:
+                        icon, note = "✅", f"Recommended — physically linked to {CURVE_FAMILY_LABELS.get(target_family, target_curve)}."
+                    elif target_family and target_family in PETROPHYSICAL_GUIDE:
+                        icon, note = "⚠️", f"No known physical relationship with {CURVE_FAMILY_LABELS.get(target_family, target_curve)} — likely just adds noise."
+                    else:
+                        icon, note = "⚪", "Target curve type isn't in the knowledge base, so this can't be judged."
+                    feature_status.append({"Feature Curve": f, "Curve Type": fam_label, "Assessment": f"{icon} {note}"})
+
+                st.dataframe(pd.DataFrame(feature_status), hide_index=True, use_container_width=True)
+
+                unrelated_names = [fs["Feature Curve"] for fs in feature_status if fs["Assessment"].startswith("⚠️")]
+                leakage_names = [fs["Feature Curve"] for fs in feature_status if fs["Assessment"].startswith("🔁")]
+
+                if unrelated_names:
+                    st.warning(
+                        f"⚠️ **Geological Disconnect Detected:** {', '.join(unrelated_names)} — no known physical "
+                        f"dependency on **{target_curve}** ({CURVE_FAMILY_LABELS.get(target_family, 'this curve type')}). "
+                        "Training will still run if you proceed, but it's fitting noise rather than real physics."
+                    )
+                if leakage_names:
+                    st.warning(
+                        f"🔁 **Data Leakage Risk:** {', '.join(leakage_names)} measure essentially the same physical "
+                        f"property as **{target_curve}**. Including it will inflate accuracy artificially rather than "
+                        f"genuinely predicting {target_curve} from independent measurements — consider removing it."
+                    )
+
             # ==========================================
-            # PHASE 3: GLOBAL DATA CENTER UI
+            # SECTION 2: ADVANCED MODEL SETTINGS
+            # ==========================================
+            with st.expander("⚙️ Advanced Model Settings", expanded=False):
+                adv_c1, adv_c2, adv_c3 = st.columns(3)
+                with adv_c1:
+                    algorithm_choice = st.selectbox(
+                        "Algorithm:",
+                        ["Auto (Compare & Pick Best)", "Random Forest", "Gradient Boosting", "Extra Trees"],
+                        index=0, key="ml_algo_choice"
+                    )
+                    n_estimators = st.slider("Number of Trees:", min_value=50, max_value=500, value=200, step=50, key="ml_n_estimators")
+                with adv_c2:
+                    max_depth_ui = st.slider("Max Tree Depth (0 = unlimited):", min_value=0, max_value=30, value=0, step=1, key="ml_max_depth")
+                    test_size = st.slider("Test Set Size:", min_value=0.10, max_value=0.40, value=0.20, step=0.05, key="ml_test_size")
+                with adv_c3:
+                    cv_folds = st.slider("Cross-Validation Folds:", min_value=3, max_value=10, value=5, step=1, key="ml_cv_folds")
+                    include_depth = st.checkbox(
+                        "Include DEPTH as a feature", value=False, key="ml_include_depth",
+                        help="Can help capture depth-related trends in Local Mode. Automatically ignored in "
+                             "Global Data Center Mode, since depth references differ well-to-well."
+                    )
+                max_depth_param = None if max_depth_ui == 0 else max_depth_ui
+
+            def _make_model(algo_name, n_est, depth):
+                if algo_name == "Random Forest":
+                    return RandomForestRegressor(n_estimators=n_est, max_depth=depth, random_state=42, n_jobs=-1)
+                elif algo_name == "Gradient Boosting":
+                    return GradientBoostingRegressor(n_estimators=n_est, max_depth=depth or 3, random_state=42)
+                else:
+                    return ExtraTreesRegressor(n_estimators=n_est, max_depth=depth, random_state=42, n_jobs=-1)
+
+            def _build_training_subset(training_df_src, feature_cols, target_col, global_mode):
+                """Returns (X_df, y_series, error_message). Handles the raw-mnemonic
+                (Local Mode) vs standardized-family (Global Mode) column naming gap so
+                the caller never hits a raw KeyError."""
+                if not global_mode:
+                    needed = feature_cols + [target_col]
+                    missing = [c for c in needed if c not in training_df_src.columns]
+                    if missing:
+                        return None, None, f"Missing from current well data: {', '.join(missing)}"
+                    subset = training_df_src[needed]
+                    return subset[feature_cols], subset[target_col], None
+
+                target_fam = classify_curve(target_col)
+                feat_fams = {f: classify_curve(f) for f in feature_cols}
+                problems = []
+                if not target_fam or target_fam not in training_df_src.columns:
+                    problems.append(f"target curve '{target_col}'")
+                for f, fam in feat_fams.items():
+                    if not fam or fam not in training_df_src.columns:
+                        problems.append(f"feature curve '{f}'")
+                if problems:
+                    return None, None, "Not resolvable in the Global Repository: " + ", ".join(problems)
+
+                std_cols = [feat_fams[f] for f in feature_cols] + [target_fam]
+                subset = training_df_src[std_cols].copy()
+                subset.columns = feature_cols + [target_col]
+                return subset[feature_cols], subset[target_col], None
+
+            # ==========================================
+            # SECTION 3: DATA SOURCE — LOCAL vs GLOBAL
             # ==========================================
             st.divider()
-            st.subheader("Global Subsurface Learning Engine")
-        
-            # Button to trigger a background sweep of the database folder
+            st.subheader("🌐 Global Subsurface Learning Engine")
+
             if st.button("🔄 Sync & Rebuild Global Repository Data"):
                 with st.spinner("Parsing repository wells and standardizing logs..."):
-                    # Unpack the two returned items
-                    master_df, skipped = rebuild_master_subsurface_database()
-                    
-                    if master_df is not None:
-                        st.success(f"Successfully compiled database! Total data points: {len(master_df)} across {master_df['WELL_NAME'].nunique()} compiled files.")
-                        
-                        # Display transparent warnings for skipped files
+                    master_df_rebuild, skipped = rebuild_master_subsurface_database()
+                    if master_df_rebuild is not None:
+                        st.success(f"Successfully compiled database! Total data points: {len(master_df_rebuild)} across {master_df_rebuild['WELL_NAME'].nunique()} compiled files.")
                         if skipped:
                             st.warning("⚠️ **Some files were ignored:**")
                             for skip_msg in skipped:
                                 st.write(f"- {skip_msg}")
                     else:
                         st.warning("The repository folder is currently empty or no files contained valid standard log curves.")
-        
-            # ML Source Selector toggle
+
             training_mode = st.radio(
                 "Select Model Training Data Range:",
-                ["Current Well Only (Local Mode)", "All Repository Wells Combined (Global Data Center Mode)"]
+                ["Current Well Only (Local Mode)", "All Repository Wells Combined (Global Data Center Mode)"],
+                key="ml_training_mode"
             )
-        
-            # Set the active training dataframe based on user selection
-            if training_mode == "All Repository Wells Combined (Global Data Center Mode)":
+
+            is_global_mode = training_mode.startswith("All Repository")
+            training_subset_error = None
+
+            if is_global_mode:
                 if os.path.exists(MASTER_DATABASE_PATH):
                     training_df = pd.read_parquet(MASTER_DATABASE_PATH)
-                    st.info(f" **Global Mode Active:** Training model on {len(training_df):,} historical data points.")
-                    # --- PHASE 4: SISTER WELL DISCOVERY UI ---
-                    sister_wells = discover_sister_wells(df_filtered, training_df)
-                    if sister_wells and sister_wells[0]['variance_score'] > 0.01: # Avoid matching with itself
-                        st.success(
-                            f"🏢 **Lithological Analog Discovered:** Based on GR footprint, your active wellbore shows "
-                            f"strong structural similarities with **{sister_wells[0]['well_name']}** "
-                            f"(Variance: {sister_wells[0]['variance_score']:.2f})."
+                    st.info(f"**Global Mode Active:** Training pool has {len(training_df):,} data points across {training_df['WELL_NAME'].nunique()} wells.")
+
+                    # Map target + every selected feature to its standardized family,
+                    # so matching/training works even when the active well spells its
+                    # curves differently than the repository does.
+                    curve_family_map = {}
+                    if target_family:
+                        curve_family_map[target_family] = target_curve
+                    for f in feature_curves:
+                        fam = classify_curve(f)
+                        if fam and fam not in curve_family_map:
+                            curve_family_map[fam] = f
+
+                    unresolved = []
+                    if not target_family or target_family not in training_df.columns:
+                        unresolved.append(f"Target curve **{target_curve}**")
+                    for f in feature_curves:
+                        fam = classify_curve(f)
+                        if not fam or fam not in training_df.columns:
+                            unresolved.append(f"Feature curve **{f}**")
+
+                    if unresolved:
+                        training_subset_error = "Not usable in Global Mode yet: " + ", ".join(unresolved)
+                        st.error(
+                            f"⚠️ {training_subset_error} — not recognized in the repository's standardized curve "
+                            "library. Switch to Local Mode, or add/sync repository wells that contain it."
                         )
+
+                    # --- Which repository LAS files actually contain the target curve? ---
+                    if target_family and target_family in training_df.columns:
+                        avail_rows = []
+                        for well_id, group in training_df.groupby('WELL_NAME'):
+                            valid_n = int(group[target_family].notna().sum())
+                            if valid_n > 0:
+                                avail_rows.append({
+                                    'LAS File': well_id,
+                                    'Valid Points': valid_n,
+                                    f'Mean {target_curve}': round(float(group[target_family].dropna().mean()), 2),
+                                })
+                        if avail_rows:
+                            st.caption(f"📂 **Repository files containing {target_curve} ({CURVE_FAMILY_LABELS.get(target_family, target_family)}):**")
+                            st.dataframe(
+                                pd.DataFrame(avail_rows).sort_values('Valid Points', ascending=False),
+                                use_container_width=True, hide_index=True
+                            )
+                        else:
+                            st.warning(f"⚠️ None of the repository wells currently contain usable **{target_curve}** data.")
+
+                        # --- Best-matching sister well(s), based on the ACTUAL curves in play ---
+                        if uploaded_file is not None:
+                            active_file_id = uploaded_file.name
+                        elif isinstance(las_file_source, str):
+                            active_file_id = os.path.basename(las_file_source)
+                        else:
+                            active_file_id = None
+                        exclude_ids = {wid for wid in training_df['WELL_NAME'].unique() if active_file_id and active_file_id in wid}
+
+                        sister_wells = discover_sister_wells(df_filtered, training_df, curve_family_map, exclude_well_ids=exclude_ids, top_n=3)
+                        if sister_wells:
+                            best = sister_wells[0]
+                            used_labels = ", ".join(CURVE_FAMILY_LABELS.get(f, f) for f in best['curves_used'])
+                            st.success(
+                                f"🏢 **Closest Structural Match:** **{best['well_name']}** "
+                                f"({best['match_score']:.0f}% similarity, compared on: {used_labels}). "
+                                "This is a statistical similarity indicator, not a guaranteed geological analog."
+                            )
+                            if len(sister_wells) > 1:
+                                with st.expander("See other candidate matches"):
+                                    for s in sister_wells[1:]:
+                                        st.write(f"- {s['well_name']} — {s['match_score']:.0f}% similarity")
+                        else:
+                            st.caption("No repository well had enough overlapping curve data to compute a structural match yet.")
                 else:
-                    st.warning("No Master Database file found. Defaulting back to current active log.")
+                    st.warning("No Master Database file found. Click 'Sync & Rebuild Global Repository Data' above. Defaulting back to current active log.")
                     training_df = df_filtered.copy()
+                    is_global_mode = False
             else:
                 training_df = df_filtered.copy()
-                
-            if st.button("Train AI & Predict"):
+
+            # ==========================================
+            # SECTION 4: TRAIN & PREDICT
+            # ==========================================
+            st.divider()
+            train_clicked = st.button("🚀 Train AI & Predict", type="primary", use_container_width=True)
+
+            if train_clicked:
                 if len(feature_curves) < 1:
                     st.warning("Please select at least one Feature Curve.")
+                elif training_subset_error:
+                    st.error(f"Can't train: {training_subset_error}")
                 else:
-                    with st.spinner(" Training Random Forest Model... Please wait!"):
-                        # 1. Clean the training data
-                        ml_train_data = training_df.dropna(subset=feature_curves + [target_curve])
-                        X_model = ml_train_data[feature_curves]
-                        y_model = ml_train_data[target_curve]
+                    with st.spinner("Training model(s)... this can take a moment for large datasets."):
+                        X_model, y_model, build_err = _build_training_subset(training_df, feature_curves, target_curve, is_global_mode)
 
-                        # 2. Split into Train & Test (FIXED)
-                        X_train, X_test, y_train, y_test = train_test_split(
-                            X_model, y_model, test_size=0.2, random_state=42
-                        )
+                        if build_err:
+                            st.error(f"⚠️ {build_err}")
+                        else:
+                            combined = pd.concat([X_model, y_model], axis=1).dropna()
+                            if include_depth and not is_global_mode and 'DEPTH' in training_df.columns:
+                                combined = combined.join(training_df['DEPTH'])
+                                model_feature_cols = feature_curves + ['DEPTH']
+                            else:
+                                model_feature_cols = feature_curves
 
-                        # 3. Train the Model
-                        model = RandomForestRegressor(n_estimators=100, random_state=42)
-                        model.fit(X_train, y_train)
+                            n_rows = len(combined)
+                            if n_rows < 10:
+                                st.error(f"⚠️ Only {n_rows} overlapping data rows after removing missing values — not enough to train reliably. Pick different curves, widen the depth range, or check for data gaps.")
+                            else:
+                                X_full = combined[model_feature_cols]
+                                y_full_natural = combined[target_curve]
 
-                        train_r2 = model.score(X_train, y_train)
-                        test_r2 = model.score(X_test, y_test)
+                                use_log = (target_family in LOG_TRANSFORM_FAMILIES) and bool((y_full_natural > 0).all())
+                                y_full = np.log10(y_full_natural.clip(lower=1e-3)) if use_log else y_full_natural
 
-                        # 4. Predict on the CURRENT well (df_filtered)
-                        pred_name = f'{target_curve}_PREDICTED'
-                        predict_df = df_filtered.dropna(subset=feature_curves).copy()
-                        
-                        # Generate raw AI predictions
-                        raw_predictions = model.predict(predict_df[feature_curves])
-                        
-                        # --- PHASE 4: HARD PHYSICAL CONSTRAINTS ---
-                        # Prevent negative values for standard logs (Porosity, Resistivity, Sonic, Caliper cannot be < 0)
-                        raw_predictions = np.clip(raw_predictions, 0.1, None)
-                        
-                        # If predicting CALI and Bit Size (BS) is present, Caliper generally shouldn't be much smaller than the bit
-                        if "CALI" in target_curve.upper() and "BS" in predict_df.columns:
-                            bs_min = predict_df["BS"].min() - 0.25 # Allow for a tiny mudcake tolerance
-                            raw_predictions = np.clip(raw_predictions, bs_min, None)
+                                X_train, X_test, y_train, y_test, y_train_nat, y_test_nat = train_test_split(
+                                    X_full, y_full, y_full_natural, test_size=test_size, random_state=42
+                                )
 
-                        predict_df[pred_name] = raw_predictions
-                        
-                        st.session_state.df[pred_name] = np.nan
-                        st.session_state.df.loc[predict_df.index, pred_name] = predict_df[pred_name]
-                        
-                        # Add AI curve to global list
-                        if pred_name not in st.session_state.available_curves:
-                            st.session_state.available_curves.append(pred_name)
+                                eff_cv = max(2, min(cv_folds, len(X_train) // 3))
+                                can_cv = len(X_train) >= eff_cv * 2
 
-                        st.success(f"Test R² Score: {test_r2:.2f}  (Train R²: {train_r2:.2f}). '{pred_name}' added globally.")
-                        if test_r2 < 0.3:
-                            st.warning("⚠️ Low test R² — these feature curves may not predict this target well. Try a different combination.")
-                        elif train_r2 - test_r2 > 0.3:
-                            st.info("ℹ️ Train R² is much higher than test R², which suggests the model may be overfitting.")
-                        
-                        # 5. Plot the Results (FIXED to use df_filtered)
-                        fig_ml = go.Figure()
-                        
-                        # We use df_filtered here to plot the original target curve if it exists
-                        original_plot_df = df_filtered.dropna(subset=[target_curve])
-                        fig_ml.add_trace(go.Scatter(x=original_plot_df[target_curve], y=original_plot_df['DEPTH'], mode='lines', name=f'Original {target_curve}', line=dict(color='black', width=3)))
-                        fig_ml.add_trace(go.Scatter(x=predict_df[pred_name], y=predict_df['DEPTH'], mode='lines', name=f'AI Predicted', line=dict(color='red', width=2, dash='dash')))
-                        
-                        fig_ml.update_yaxes(autorange="reversed")
-                        fig_ml.update_layout(
-                            margin=dict(t=150, b=20, l=50, r=20),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)")
-                        )
-                        st.plotly_chart(fig_ml, use_container_width=True)
-                        st.session_state['ml_fig'] = fig_ml
-                        
-        # --- TAB 10: REPORT GENERATOR ---
+                                # --- Pick the algorithm ---
+                                comparison_scores = {}
+                                if algorithm_choice.startswith("Auto"):
+                                    compare_n_est = min(n_estimators, 100)
+                                    algo_names = ["Random Forest", "Gradient Boosting", "Extra Trees"]
+                                    if can_cv:
+                                        kf = KFold(n_splits=eff_cv, shuffle=True, random_state=42)
+                                        for name in algo_names:
+                                            try:
+                                                cvs = cross_val_score(_make_model(name, compare_n_est, max_depth_param), X_train, y_train, cv=kf, scoring='r2')
+                                                comparison_scores[name] = float(np.mean(cvs))
+                                            except Exception:
+                                                comparison_scores[name] = float('-inf')
+                                    else:
+                                        for name in algo_names:
+                                            mdl = _make_model(name, compare_n_est, max_depth_param)
+                                            mdl.fit(X_train, y_train)
+                                            comparison_scores[name] = float(mdl.score(X_test, y_test)) if len(X_test) else 0.0
+                                    best_algo_name = max(comparison_scores, key=comparison_scores.get)
+                                else:
+                                    best_algo_name = algorithm_choice
+
+                                # --- Honest evaluation: fit on train split, score on held-out test ---
+                                eval_model = _make_model(best_algo_name, n_estimators, max_depth_param)
+                                eval_model.fit(X_train, y_train)
+
+                                y_test_arr = y_test_nat.to_numpy()
+                                test_pred = eval_model.predict(X_test)
+                                test_pred = (10 ** test_pred) if use_log else test_pred
+                                test_pred = np.asarray(test_pred)
+
+                                y_train_arr = y_train_nat.to_numpy()
+                                train_pred = eval_model.predict(X_train)
+                                train_pred = (10 ** train_pred) if use_log else train_pred
+                                train_pred = np.asarray(train_pred)
+
+                                test_r2 = r2_score(y_test_arr, test_pred) if len(y_test_arr) else float('nan')
+                                test_mae = mean_absolute_error(y_test_arr, test_pred) if len(y_test_arr) else float('nan')
+                                test_rmse = float(np.sqrt(mean_squared_error(y_test_arr, test_pred))) if len(y_test_arr) else float('nan')
+                                mape_mask = np.abs(y_test_arr) > 1e-6
+                                test_mape = float(np.mean(np.abs((y_test_arr[mape_mask] - test_pred[mape_mask]) / y_test_arr[mape_mask])) * 100) if mape_mask.sum() > 0 else None
+                                train_r2 = r2_score(y_train_arr, train_pred) if len(y_train_arr) else float('nan')
+
+                                if can_cv:
+                                    kf2 = KFold(n_splits=eff_cv, shuffle=True, random_state=42)
+                                    cv_scores = cross_val_score(_make_model(best_algo_name, n_estimators, max_depth_param), X_full, y_full, cv=kf2, scoring='r2')
+                                    cv_r2_mean, cv_r2_std = float(np.mean(cv_scores)), float(np.std(cv_scores))
+                                else:
+                                    cv_r2_mean, cv_r2_std = None, None
+
+                                # --- Production model: refit on ALL available rows for best real-world accuracy ---
+                                production_model = _make_model(best_algo_name, n_estimators, max_depth_param)
+                                production_model.fit(X_full, y_full)
+
+                                # --- Predict on the CURRENT well ---
+                                predict_df = df_filtered.dropna(subset=feature_curves).copy()
+                                if include_depth and not is_global_mode and 'DEPTH' in predict_df.columns:
+                                    predict_X = predict_df[feature_curves + ['DEPTH']]
+                                else:
+                                    predict_X = predict_df[feature_curves]
+
+                                raw_pred = production_model.predict(predict_X)
+                                raw_pred = (10 ** raw_pred) if use_log else raw_pred
+
+                                # --- Physical constraints, generalized across curve families ---
+                                lo, hi = PHYSICAL_BOUNDS.get(target_family, (None, None))
+                                if lo is not None or hi is not None:
+                                    raw_pred = np.clip(raw_pred, lo, hi)
+                                if target_family == 'CALI':
+                                    bs_col = next((c for c in predict_df.columns if classify_curve(c) == 'BS'), None)
+                                    if bs_col:
+                                        bs_min = predict_df[bs_col].min() - 0.25  # tiny mudcake tolerance
+                                        raw_pred = np.clip(raw_pred, bs_min, None)
+
+                                pred_name = f'{target_curve}_PREDICTED'
+                                predict_df[pred_name] = raw_pred
+
+                                st.session_state.df[pred_name] = np.nan
+                                st.session_state.df.loc[predict_df.index, pred_name] = predict_df[pred_name]
+                                if pred_name not in st.session_state.available_curves:
+                                    st.session_state.available_curves.append(pred_name)
+
+                                # ---- RESULTS UI ----
+                                auto_suffix = " (auto-selected)" if algorithm_choice.startswith("Auto") else ""
+                                st.success(f"✅ Best model: **{best_algo_name}**{auto_suffix}, trained on {n_rows:,} rows. '{pred_name}' added to all viewers.")
+
+                                if comparison_scores:
+                                    with st.expander("🔬 Algorithm comparison (cross-validated R²)"):
+                                        comp_df = pd.DataFrame(
+                                            [{"Algorithm": k, "CV R²": round(v, 3)} for k, v in sorted(comparison_scores.items(), key=lambda x: -x[1])]
+                                        )
+                                        st.dataframe(comp_df, hide_index=True, use_container_width=True)
+
+                                m1, m2, m3, m4 = st.columns(4)
+                                m1.metric("Test R²", f"{test_r2:.3f}" if not np.isnan(test_r2) else "N/A")
+                                m2.metric("Test MAE", f"{test_mae:.3f}" if not np.isnan(test_mae) else "N/A")
+                                m3.metric("Test RMSE", f"{test_rmse:.3f}" if not np.isnan(test_rmse) else "N/A")
+                                m4.metric("Test MAPE", f"{test_mape:.1f}%" if test_mape is not None else "N/A")
+
+                                if cv_r2_mean is not None:
+                                    st.caption(
+                                        f"📊 {eff_cv}-Fold Cross-Validated R²: **{cv_r2_mean:.3f} ± {cv_r2_std:.3f}**"
+                                        f"{' (log-space, standard for resistivity/permeability)' if use_log else ''} "
+                                        f"— a more reliable accuracy estimate than a single train/test split."
+                                    )
+                                else:
+                                    st.caption(f"Train R²: {train_r2:.3f}. Dataset too small for cross-validation — treat these numbers as indicative, not conclusive.")
+
+                                if np.isnan(test_r2):
+                                    pass
+                                elif test_r2 < 0.3:
+                                    st.warning("⚠️ Low R² — these feature curves likely don't predict this target well. Try a different, more physically-related combination, or add more training data (Global Mode).")
+                                elif train_r2 - test_r2 > 0.3:
+                                    st.info("ℹ️ Train accuracy is much higher than test accuracy, which suggests overfitting. Try reducing tree depth or adding more data.")
+                                elif test_r2 > 0.85:
+                                    st.success("🎯 Strong fit — predictions closely track the real log across the held-out test data.")
+
+                                if use_log:
+                                    st.caption(f"ℹ️ {target_curve} was modeled in log-space (standard practice for resistivity/permeability-type curves, which are log-normally distributed) and converted back automatically.")
+
+                                # --- Feature importance ---
+                                importances = getattr(production_model, 'feature_importances_', None)
+                                if importances is not None and len(importances) == len(model_feature_cols):
+                                    imp_df = pd.DataFrame({'Feature': model_feature_cols, 'Importance': importances}).sort_values('Importance', ascending=True)
+                                    fig_imp = go.Figure(go.Bar(x=imp_df['Importance'], y=imp_df['Feature'], orientation='h', marker_color='#4682B4'))
+                                    fig_imp.update_layout(title="Feature Importance", height=280, margin=dict(t=40, b=20, l=10, r=10), plot_bgcolor='white')
+                                    st.plotly_chart(fig_imp, use_container_width=True)
+
+                                # --- Plot Original vs Predicted ---
+                                fig_ml = go.Figure()
+                                original_plot_df = df_filtered.dropna(subset=[target_curve])
+                                fig_ml.add_trace(go.Scatter(x=original_plot_df[target_curve], y=original_plot_df['DEPTH'], mode='lines', name=f'Original {target_curve}', line=dict(color='black', width=3)))
+                                fig_ml.add_trace(go.Scatter(x=predict_df[pred_name], y=predict_df['DEPTH'], mode='lines', name='AI Predicted', line=dict(color='red', width=2, dash='dash')))
+                                fig_ml.update_yaxes(autorange="reversed")
+                                fig_ml.update_layout(
+                                    margin=dict(t=150, b=20, l=50, r=20),
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.15, xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)")
+                                )
+                                st.plotly_chart(fig_ml, use_container_width=True)
+                                st.session_state['ml_fig'] = fig_ml
+
+                                # --- Download predicted curve ---
+                                pred_csv = predict_df[['DEPTH', pred_name]].to_csv(index=False).encode('utf-8')
+                                st.download_button("⬇️ Download Predicted Curve (CSV)", data=pred_csv, file_name=f"{pred_name}.csv", mime='text/csv')
+
+
         import datetime
         import tempfile
         import io
