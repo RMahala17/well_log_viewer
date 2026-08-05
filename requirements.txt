@@ -1,4 +1,4 @@
-streamlit==1.56.0
+streamlit==1.57.0
 pandas
 numpy
 lasio
@@ -11,5 +11,5 @@ requests
 Pillow
 anthropic
 pyarrow
-starlette<1.0
+
 
