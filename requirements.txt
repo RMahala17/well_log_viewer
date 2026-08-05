@@ -10,5 +10,6 @@ psutil
 requests
 Pillow
 anthropic
-pyarrow<25
+pyarrow
+starlette<1.0
 
